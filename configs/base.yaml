@@ -54,6 +54,9 @@ dataset:
     # once per session to build the ImageFolder-ready val_if/train_if dirs.
     val_dir: "/kaggle/working/tiny-imagenet-200/val_if"
     train_dir: "/kaggle/working/tiny-imagenet-200/train_if"
+    # The 200-class synset→ImageNet map is built at runtime from this file
+    # (falls back to <train_dir>/../wnids.txt if omitted). No paste step needed.
+    wnids: "/kaggle/working/tiny-imagenet-200/wnids.txt"
 
 # Attack - FGSM
 fgsm:
