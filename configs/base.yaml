@@ -26,17 +26,34 @@ compression:
     bnb_4bit_compute_dtype: "float16"
 
 # Dataset
+# `name` is the ONLY switch — flip it between "imagenette" and "tiny-imagenet".
+# load_config() flattens the active sub-block up into `dataset`, so every
+# downstream `cfg["dataset"]["val_dir"]` etc. keeps working unchanged.
+# `mean`/`std` are shared: both datasets feed the same ImageNet-pretrained DeiT-S.
 dataset:
-  name: "imagenette"
-  val_subset_size: 3925   # ImageNette val has ~3925 images total — use all of them
-  train_subset_size: 9469  # ImageNette train has ~9469 images total — use all of them
+  name: "tiny-imagenet"
   image_size: 224
   mean: [0.485, 0.456, 0.406]
   std: [0.229, 0.224, 0.225]
-  # Kaggle: attach adityakane/imagenette2 in notebook settings.
-  # Extract the archive once per session (see CLAUDE.md → Kaggle session startup).
-  val_dir: "/kaggle/working/imagenette2/val"
-  train_dir: "/kaggle/working/imagenette2/train"
+
+  imagenette:
+    resize: 256             # Resize(256) → CenterCrop(224) — standard ImageNet preprocessing
+    val_subset_size: 3925   # ImageNette val has ~3925 images total — use all of them
+    train_subset_size: 9469  # ImageNette train has ~9469 images total — use all of them
+    # Kaggle: attach adityakane/imagenette2 in notebook settings.
+    # Extract the archive once per session (see CLAUDE.md → Kaggle session startup).
+    val_dir: "/kaggle/working/imagenette2/val"
+    train_dir: "/kaggle/working/imagenette2/train"
+
+  tiny-imagenet:
+    resize: 224             # native 64px → 224 direct; 256+crop would discard real content
+    val_subset_size: 10000  # Tiny-ImageNet val has 10000 images (50/class × 200)
+    train_subset_size: 100000  # Tiny-ImageNet train has 100000 images (500/class × 200)
+    # Kaggle: attach the standard tiny-imagenet-200 zip, then run
+    #   python scripts/prepare_tiny_imagenet.py
+    # once per session to build the ImageFolder-ready val_if/train_if dirs.
+    val_dir: "/kaggle/working/tiny-imagenet-200/val_if"
+    train_dir: "/kaggle/working/tiny-imagenet-200/train_if"
 
 # Attack - FGSM
 fgsm:

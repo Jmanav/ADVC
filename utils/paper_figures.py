@@ -48,6 +48,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from models.loader import load_config, load_model, resolve_data_path
+from utils.datasets import build_eval_transform, build_remapped_folder
 import attacks.fgsm as fgsm_mod
 import attacks.pgd  as pgd_mod
 import attacks.patch as patch_mod
@@ -79,26 +80,6 @@ COLORS = {
 DEFENSE_LABELS = {"none": "No defense", "at": "AT", "at_kd": "AT+KD"}
 COMPRESSION_LABELS = {"fp32": "FP32", "int8": "INT8", "int4": "INT4"}
 ATTACK_LABELS = {"fgsm": "FGSM", "pgd": "PGD", "patch": "Patch"}
-
-# ── Label remapping ───────────────────────────────────────────────────────────
-
-_IMAGENETTE_TO_IMAGENET: dict[str, int] = {
-    "n01440764": 0,   "n02102040": 217, "n02979186": 482,
-    "n03000684": 491, "n03028079": 497, "n03394916": 566,
-    "n03417042": 569, "n03425413": 571, "n03445777": 574,
-    "n03888257": 701,
-}
-
-def _remap_labels(dataset):
-    if len(dataset.classes) >= 1000:
-        return dataset
-    new_samples = []
-    for path, lbl in dataset.samples:
-        synset = dataset.classes[lbl]
-        new_samples.append((path, _IMAGENETTE_TO_IMAGENET.get(synset, lbl)))
-    dataset.samples = new_samples
-    dataset.targets = [lbl for _, lbl in new_samples]
-    return dataset
 
 # ── Tensor / image helpers ────────────────────────────────────────────────────
 
@@ -152,15 +133,8 @@ def _unnorm_batch(t: torch.Tensor, mean: list, std: list) -> torch.Tensor:
 
 def _build_loader(cfg: dict, n: int, device: str) -> DataLoader:
     ds_cfg = cfg["dataset"]
-    transform = T.Compose([
-        T.Resize(256),
-        T.CenterCrop(ds_cfg["image_size"]),
-        T.ToTensor(),
-        T.Normalize(mean=ds_cfg["mean"], std=ds_cfg["std"]),
-    ])
-    ds = _remap_labels(
-        ImageFolder(root=str(resolve_data_path(_ROOT, ds_cfg["val_dir"])), transform=transform)
-    )
+    transform = build_eval_transform(cfg)
+    ds = build_remapped_folder(ds_cfg["val_dir"], transform, cfg)
     rng = torch.Generator()
     rng.manual_seed(cfg["seed"])
     indices = torch.randperm(len(ds), generator=rng)[:n].tolist()

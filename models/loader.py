@@ -32,14 +32,31 @@ def load_config(config_path: str = "configs/base.yaml") -> dict:
     """
     Load the base YAML config.
 
+    The `dataset` section holds per-dataset sub-blocks (`imagenette`,
+    `tiny-imagenet`) keyed under the active `dataset.name`. This function
+    flattens the active sub-block up into `dataset` so all downstream reads
+    (`cfg["dataset"]["val_dir"]`, `["resize"]`, subset sizes, ...) resolve
+    without every call site needing to know which dataset is active.
+
     Args:
         config_path: Path to base.yaml relative to project root.
 
     Returns:
-        config: Parsed config as a dictionary.
+        config: Parsed config as a dictionary, with the active dataset
+        sub-block merged into `config["dataset"]`.
     """
     with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+
+    ds = config.get("dataset", {})
+    active = ds.get("name")
+    if active and isinstance(ds.get(active), dict):
+        # Merge the active sub-block's keys up into `dataset` (shared keys like
+        # image_size/mean/std/name stay; per-dataset keys like val_dir override).
+        for key, value in ds[active].items():
+            ds[key] = value
+
+    return config
 
 
 def load_model(

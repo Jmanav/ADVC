@@ -33,6 +33,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from models.loader import load_config, load_model, resolve_data_path
+from utils.datasets import build_eval_transform, build_remapped_folder
 import attacks.fgsm as fgsm_mod
 import attacks.pgd as pgd_mod
 import attacks.patch as patch_mod
@@ -83,40 +84,6 @@ class LogitsWrapper(nn.Module):
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-# When using ImageNette (10-class subset) instead of full ImageNet-1k, the
-# ImageFolder class indices (0–9) don't match the pretrained model's output
-# indices.  This table remaps each synset to its correct ImageNet-1k position.
-_IMAGENETTE_TO_IMAGENET: dict[str, int] = {
-    "n01440764": 0,    # tench
-    "n02102040": 217,  # English springer
-    "n02979186": 482,  # cassette player
-    "n03000684": 491,  # chain saw
-    "n03028079": 497,  # church
-    "n03394916": 566,  # French horn
-    "n03417042": 569,  # garbage truck
-    "n03425413": 571,  # gas pump
-    "n03445777": 574,  # golf ball
-    "n03888257": 701,  # parachute
-}
-
-
-def _remap_subset_labels(dataset: ImageFolder) -> ImageFolder:
-    """Remap ImageFolder targets to ImageNet-1k indices for subset datasets.
-
-    No-op when the dataset already has 1000 classes (full ImageNet).
-    """
-    if len(dataset.classes) >= 1000:
-        return dataset
-    new_samples = []
-    for path, lbl in dataset.samples:
-        synset = dataset.classes[lbl]
-        new_lbl = _IMAGENETTE_TO_IMAGENET.get(synset, lbl)
-        new_samples.append((path, new_lbl))
-    dataset.samples = new_samples
-    dataset.targets = [lbl for _, lbl in new_samples]
-    return dataset
-
-
 def build_val_loader(cfg: dict, device: str) -> DataLoader:
     """Build a deterministic subset loader for the validation set.
 
@@ -130,15 +97,8 @@ def build_val_loader(cfg: dict, device: str) -> DataLoader:
     ds_cfg = cfg["dataset"]
     eval_cfg = cfg["eval"]
 
-    transform = T.Compose([
-        T.Resize(256),
-        T.CenterCrop(ds_cfg["image_size"]),
-        T.ToTensor(),
-        T.Normalize(mean=ds_cfg["mean"], std=ds_cfg["std"]),
-    ])
-
-    full_dataset = ImageFolder(root=str(resolve_data_path(_ROOT, ds_cfg["val_dir"])), transform=transform)
-    full_dataset = _remap_subset_labels(full_dataset)
+    transform = build_eval_transform(cfg)
+    full_dataset = build_remapped_folder(ds_cfg["val_dir"], transform, cfg)
 
     rng = torch.Generator()
     rng.manual_seed(cfg["seed"])
@@ -169,15 +129,8 @@ def build_patch_val_loader(cfg: dict, device: str) -> DataLoader:
     ds_cfg = cfg["dataset"]
     eval_cfg = cfg["eval"]
 
-    transform = T.Compose([
-        T.Resize(256),
-        T.CenterCrop(ds_cfg["image_size"]),
-        T.ToTensor(),
-        T.Normalize(mean=ds_cfg["mean"], std=ds_cfg["std"]),
-    ])
-
-    full_dataset = ImageFolder(root=str(resolve_data_path(_ROOT, ds_cfg["val_dir"])), transform=transform)
-    full_dataset = _remap_subset_labels(full_dataset)
+    transform = build_eval_transform(cfg)
+    full_dataset = build_remapped_folder(ds_cfg["val_dir"], transform, cfg)
 
     # Draw from the same shuffled order as build_val_loader so the 500 images
     # are a strict prefix of the full val subset — results stay comparable.
