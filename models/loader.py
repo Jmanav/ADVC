@@ -28,6 +28,26 @@ def resolve_data_path(root: Path, rel_or_abs: str) -> Path:
     return p if p.is_absolute() else root / p
 
 
+def dataset_results_path(results_file: str, cfg: dict) -> str:
+    """Insert the active dataset name into a results CSV path.
+
+    Keeps per-dataset results in separate files so runs on different datasets
+    never collide or falsely resume from each other. E.g. with dataset.name
+    "tiny-imagenet", "results/phase1_results.csv" becomes
+    "results/tiny-imagenet/phase1_results.csv".
+
+    Args:
+        results_file: Base results path (e.g. "results/phase1_results.csv").
+        cfg: Parsed base.yaml config with the active dataset flattened.
+
+    Returns:
+        Dataset-scoped results path as a string.
+    """
+    name = cfg["dataset"]["name"]
+    p = Path(results_file)
+    return str(p.parent / name / p.name)
+
+
 def load_config(config_path: str = "configs/base.yaml") -> dict:
     """
     Load the base YAML config.

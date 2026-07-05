@@ -32,7 +32,12 @@ from torch.utils.data import DataLoader, Subset
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from models.loader import load_config, load_model, resolve_data_path
+from models.loader import (
+    dataset_results_path,
+    load_config,
+    load_model,
+    resolve_data_path,
+)
 from utils.datasets import build_eval_transform, build_remapped_folder
 import attacks.fgsm as fgsm_mod
 import attacks.pgd as pgd_mod
@@ -49,6 +54,7 @@ from utils.metrics import (
 RESULTS_FILE = "results/phase1_results.csv"
 FIELDNAMES = [
     "timestamp",
+    "dataset",
     "model",
     "compression",
     "attack",
@@ -166,6 +172,7 @@ def load_completed_runs(results_path: str) -> set:
 
 def append_row(
     results_path: str,
+    dataset_name: str,
     model_name: str,
     compression: str,
     attack_name: str,
@@ -183,6 +190,7 @@ def append_row(
             writer.writeheader()
         writer.writerow({
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "dataset": dataset_name,
             "model": model_name,
             "compression": compression,
             "attack": attack_name,
@@ -288,6 +296,10 @@ def main() -> None:
     cfg = load_config(str(_ROOT / "configs/base.yaml"))
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    global RESULTS_FILE
+    RESULTS_FILE = dataset_results_path(RESULTS_FILE, cfg)
+
+    print(f"[phase1] dataset     : {cfg['dataset']['name']}")
     print(f"[phase1] device      : {device}")
     print(f"[phase1] model       : {model_name}")
     print(f"[phase1] results     : {RESULTS_FILE}")
@@ -387,7 +399,7 @@ def main() -> None:
                 f"robust_acc={rob_acc:.4f}  asr={asr:.4f}  gap={rob_gap:.4f}"
             )
 
-            append_row(RESULTS_FILE, model_name, compression, attack_name, c_acc, rob_acc, asr, rob_gap)
+            append_row(RESULTS_FILE, cfg["dataset"]["name"], model_name, compression, attack_name, c_acc, rob_acc, asr, rob_gap)
             print(f"[phase1] {compression:<6} × {attack_name:<5}: saved → {RESULTS_FILE}")
 
         # ── Free GPU memory before loading the next compression level ──────────
