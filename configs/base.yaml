@@ -50,13 +50,15 @@ dataset:
     val_subset_size: 10000  # Tiny-ImageNet val has 10000 images (50/class × 200)
     train_subset_size: 100000  # Tiny-ImageNet train has 100000 images (500/class × 200)
     # Kaggle: attach the standard tiny-imagenet-200 zip, then run
-    #   python scripts/prepare_tiny_imagenet.py
+    #   python scripts/prepare_tiny_imagenet.py --root <src> --out /kaggle/working/tiny_if
     # once per session to build the ImageFolder-ready val_if/train_if dirs.
-    val_dir: "/kaggle/working/tiny-imagenet-200/val_if"
-    train_dir: "/kaggle/working/tiny-imagenet-200/train_if"
+    # NOTE: output must be a WRITABLE dir. On Kaggle the dataset mount (and any
+    # symlink to it) is read-only, so we write the _if folders to /kaggle/working/tiny_if.
+    val_dir: "/kaggle/working/tiny_if/val_if"
+    train_dir: "/kaggle/working/tiny_if/train_if"
     # The 200-class synset→ImageNet map is built at runtime from this file
     # (falls back to <train_dir>/../wnids.txt if omitted). No paste step needed.
-    wnids: "/kaggle/working/tiny-imagenet-200/wnids.txt"
+    wnids: "/kaggle/working/tiny_if/wnids.txt"
 
 # Attack - FGSM
 fgsm:

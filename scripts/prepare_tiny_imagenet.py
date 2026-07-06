@@ -47,10 +47,10 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def prepare_train(root: Path) -> None:
+def prepare_train(root: Path, out: Path) -> None:
     """Flatten train/nXXXX/images/*.JPEG → train_if/nXXXX/*.JPEG."""
     src_train = root / "train"
-    dst_train = root / "train_if"
+    dst_train = out / "train_if"
     if not src_train.is_dir():
         raise FileNotFoundError(f"Missing {src_train}")
 
@@ -69,11 +69,11 @@ def prepare_train(root: Path) -> None:
     print(f"[prep] train_if ready at {dst_train}")
 
 
-def prepare_val(root: Path) -> None:
+def prepare_val(root: Path, out: Path) -> None:
     """Regroup flat val/images/*.JPEG into val_if/nXXXX/*.JPEG via annotations."""
     src_val_imgs = root / "val" / "images"
     ann_path = root / "val" / "val_annotations.txt"
-    dst_val = root / "val_if"
+    dst_val = out / "val_if"
     if not src_val_imgs.is_dir():
         raise FileNotFoundError(f"Missing {src_val_imgs}")
     if not ann_path.is_file():
@@ -106,16 +106,40 @@ def main() -> None:
         "--root",
         type=str,
         default="/kaggle/working/tiny-imagenet-200",
-        help="Path to the extracted tiny-imagenet-200 directory.",
+        help="Path to the extracted tiny-imagenet-200 directory (may be read-only).",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help=(
+            "Writable directory for the generated train_if/ and val_if/ folders. "
+            "Defaults to --root. On Kaggle, --root is a symlink into the read-only "
+            "/kaggle/input mount, so pass a writable path like /kaggle/working."
+        ),
     )
     args = parser.parse_args()
     root = Path(args.root)
     if not root.is_dir():
         raise FileNotFoundError(f"Tiny-ImageNet root not found: {root}")
+    out = Path(args.out) if args.out else root
+    out.mkdir(parents=True, exist_ok=True)
 
-    prepare_train(root)
-    prepare_val(root)
-    print("[prep] Done. Point configs at train_if/ and val_if/ (already set).")
+    prepare_train(root, out)
+    prepare_val(root, out)
+
+    # Copy wnids.txt into the writable out dir so nothing downstream depends on
+    # the (possibly read-only) source path or a symlink into /kaggle/input.
+    src_wnids = root / "wnids.txt"
+    if src_wnids.is_file():
+        dst_wnids = out / "wnids.txt"
+        if not dst_wnids.exists():
+            shutil.copy2(src_wnids, dst_wnids)
+        print(f"[prep] wnids.txt copied to {dst_wnids}")
+    else:
+        print(f"[prep] WARNING: {src_wnids} not found — set dataset.wnids manually.")
+
+    print(f"[prep] Done. train_if/, val_if/, wnids.txt written under {out}.")
 
 
 if __name__ == "__main__":
