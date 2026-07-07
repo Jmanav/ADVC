@@ -18,6 +18,46 @@ python experiments/eval_phase2_atkd.py --model deit_small [--skip-training] [--c
 python experiments/eval_phase3.py --model deit_small
 ```
 
+### Kaggle multi-session workflow (CRITICAL — the 36-row matrix does NOT fit in one 12h session)
+
+The primary notebook is `notebooks/run_phases_kaggle.ipynb`. Total compute (~20 GPU-h) exceeds
+Kaggle's 12h/session cap, so work is split across sessions. The atomic unit of progress is
+**one compression level trained to completion** (all 7 epochs), because `--skip-training` only
+reloads the FINAL-epoch checkpoint (`*_epoch07*.pt`). A level interrupted mid-training is NOT
+resumable and retrains from scratch.
+
+**Persistence rules (do not skip — these are how work survives across sessions):**
+- `/kaggle/working` is WIPED between sessions. The ONLY way to carry results/checkpoints forward
+  is to save `results/` to a Kaggle **dataset** (`kaggle datasets version -p .../results`) at the
+  end of every session, and re-attach it next session. Do not rely on working-dir persistence.
+- Notebook Cell 5b restores CSVs + checkpoints from the attached dataset to the exact paths the
+  scripts read. Cell 5c verifies resume state BEFORE spending GPU. Cell 13 saves at session end.
+- Cells 8/9 auto-detect a restored `*_epoch07*.pt` and add `--skip-training` (eval only, no retrain).
+
+**Per-dataset result separation (prevents imagenette/tiny-imagenet mixing):**
+- `models/loader.py:dataset_results_path()` rewrites `results/phaseN_results.csv` →
+  `results/<dataset.name>/phaseN_results.csv` at runtime. So tiny-imagenet writes to
+  `results/tiny-imagenet/` and imagenette to `results/imagenette/` — they physically cannot mix.
+- ALWAYS restore/preview/save using the per-dataset path `results/tiny-imagenet/...`, NEVER flat
+  `results/...`. Reading flat `results/phase1_results.csv` finds nothing (silent "not generated")
+  and restoring to flat `results/` breaks resume (scripts read the subfolder). This was a real bug.
+- Checkpoints are flat (`results/checkpoints/{at,atkd}/`, no dataset subfolder) — but their
+  filenames don't encode the dataset, so do NOT reuse a checkpoint dataset across datasets.
+
+**Suggested session split** (each fits under 12h; set `LEVELS` in Cells 8/9):
+| Session | Work | Approx |
+|---|---|---|
+| 1 | setup + Phase 1, then Phase 2a `LEVELS=['fp32','int8']` | ~6h |
+| 2 | restore, Phase 2a `LEVELS=['int4']` | ~3h |
+| 3 | restore, Phase 2b `LEVELS=['fp32','int8']` | ~7h |
+| 4 | restore, Phase 2b `LEVELS=['int4']` | ~4h |
+| 5 | restore, Phase 3 + figures | ~4h |
+
+**Kaggle data-prep gotcha (fixed):** `scripts/prepare_tiny_imagenet.py` takes `--root` (read-only
+source, may be a `/kaggle/input` mount) AND `--out` (writable, e.g. `/kaggle/working/tiny_if`).
+Writing `train_if/`/`val_if/` into a read-only mount raises `Errno 30`. `configs/base.yaml` points
+tiny-imagenet dirs at `/kaggle/working/tiny_if/...`. Never symlink the read-only mount as the output.
+
 ### Attack interface (every attack must match this signature)
 
 ```python
