@@ -406,7 +406,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--compression",
-        choices=["int8", "int4"],
+        choices=["fp32", "int8", "int4"],
         default=None,
         help="Run only this compression level. Default runs all three.",
     )
