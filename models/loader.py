@@ -48,6 +48,31 @@ def dataset_results_path(results_file: str, cfg: dict) -> str:
     return str(p.parent / name / p.name)
 
 
+def dataset_scoped_dir(base_dir: str, cfg: dict) -> str:
+    """Insert the active dataset name into a directory path.
+
+    Keeps per-dataset checkpoints and figures physically separated so runs on
+    different datasets never overwrite each other (checkpoint/figure FILENAMES
+    do not encode the dataset, so without this an int8 checkpoint or a figure
+    from one dataset would silently clobber the other's).
+
+    The dataset name is inserted as the parent of the final path component:
+      "results/checkpoints/at"   -> "results/checkpoints/<name>/at"
+      "results/checkpoints/atkd" -> "results/checkpoints/<name>/atkd"
+      "results/figures"          -> "results/figures/<name>"
+
+    Args:
+        base_dir: Base directory path from config (e.g. "results/checkpoints/at").
+        cfg: Parsed base.yaml config with the active dataset flattened.
+
+    Returns:
+        Dataset-scoped directory path as a string.
+    """
+    name = cfg["dataset"]["name"]
+    p = Path(base_dir)
+    return str(p.parent / name / p.name)
+
+
 def load_config(config_path: str = "configs/base.yaml") -> dict:
     """
     Load the base YAML config.

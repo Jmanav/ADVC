@@ -29,7 +29,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 import torchattacks
-from models.loader import load_config, resolve_data_path  # noqa: F401 — re-exported for convenience
+from models.loader import load_config, resolve_data_path, dataset_scoped_dir  # noqa: F401 — re-exported for convenience
 
 
 class _LogitsWrapper(nn.Module):
@@ -318,7 +318,7 @@ def adversarial_train(
 
     defense_cfg = config["defense"]
     ds_cfg      = config["dataset"]
-    ckpt_dir = config["paths"]["checkpoints_at_dir"]
+    ckpt_dir = dataset_scoped_dir(config["paths"]["checkpoints_at_dir"], config)
     epochs: int            = defense_cfg["epochs"]
     weight_decay: float    = defense_cfg["weight_decay"]
     at_eps: float          = defense_cfg["at_eps"]

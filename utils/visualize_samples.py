@@ -38,7 +38,7 @@ from torchvision.datasets import ImageFolder
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from models.loader import load_config, load_model, resolve_data_path
+from models.loader import load_config, load_model, resolve_data_path, dataset_scoped_dir
 from utils.datasets import build_eval_transform, build_remapped_folder
 import attacks.fgsm as fgsm_mod
 import attacks.pgd as pgd_mod
@@ -313,7 +313,7 @@ def main() -> None:
     cfg = load_config(str(_ROOT / "configs/base.yaml"))
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    figures_dir = _ROOT / cfg["paths"]["figures_dir"]
+    figures_dir = _ROOT / dataset_scoped_dir(cfg["paths"]["figures_dir"], cfg)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     all_compressions: list[str] = cfg["compression"]["levels"]

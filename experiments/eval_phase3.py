@@ -34,6 +34,7 @@ sys.path.insert(0, str(_ROOT))
 
 from models.loader import (
     dataset_results_path,
+    dataset_scoped_dir,
     load_config,
     load_model,
     resolve_data_path,
@@ -177,14 +178,14 @@ def load_defended_model(
     epochs: int = cfg["defense"]["epochs"]
 
     if defense == "at":
-        ckpt_dir = _ROOT / cfg["paths"]["checkpoints_at_dir"]
+        ckpt_dir = _ROOT / dataset_scoped_dir(cfg["paths"]["checkpoints_at_dir"], cfg)
         full_path  = ckpt_dir / f"at_{compression}_epoch{epochs:02d}_full_model.pt"
         state_path = ckpt_dir / f"at_{compression}_epoch{epochs:02d}.pt"
         device = infer_model_device(model) or "cuda"
         return _load_checkpoint(model, full_path, state_path, f"{compression}+AT", device)
 
     if defense == "at_kd":
-        ckpt_dir = _ROOT / cfg["paths"]["checkpoints_atkd_dir"]
+        ckpt_dir = _ROOT / dataset_scoped_dir(cfg["paths"]["checkpoints_atkd_dir"], cfg)
         full_path  = ckpt_dir / f"atkd_{compression}_epoch{epochs:02d}_full_model.pt"
         state_path = ckpt_dir / f"atkd_{compression}_epoch{epochs:02d}.pt"
         device = infer_model_device(model) or "cuda"

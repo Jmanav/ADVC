@@ -47,7 +47,7 @@ from torchvision.datasets import ImageFolder
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from models.loader import load_config, load_model, resolve_data_path
+from models.loader import load_config, load_model, resolve_data_path, dataset_scoped_dir
 from utils.datasets import build_eval_transform, build_remapped_folder
 import attacks.fgsm as fgsm_mod
 import attacks.pgd  as pgd_mod
@@ -441,7 +441,7 @@ def fig3_defense_pipeline(
 
     # AT-defended model (optional — load checkpoint if available)
     preds_def = None
-    ckpt_dir  = _ROOT / cfg["paths"]["checkpoints_at_dir"]
+    ckpt_dir  = _ROOT / dataset_scoped_dir(cfg["paths"]["checkpoints_at_dir"], cfg)
     epochs    = cfg["defense"]["epochs"]
     full_path = ckpt_dir / f"at_{compression}_epoch{epochs:02d}_full_model.pt"
     sd_path   = ckpt_dir / f"at_{compression}_epoch{epochs:02d}.pt"
@@ -804,7 +804,7 @@ def main() -> None:
     cfg    = load_config(str(_ROOT / "configs/base.yaml"))
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    figures_dir: Path = _ROOT / cfg["paths"]["figures_dir"]
+    figures_dir: Path = _ROOT / dataset_scoped_dir(cfg["paths"]["figures_dir"], cfg)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     all_compressions = cfg["compression"]["levels"]

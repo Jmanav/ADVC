@@ -34,15 +34,23 @@ resumable and retrains from scratch.
   scripts read. Cell 5c verifies resume state BEFORE spending GPU. Cell 13 saves at session end.
 - Cells 8/9 auto-detect a restored `*_epoch07*.pt` and add `--skip-training` (eval only, no retrain).
 
-**Per-dataset result separation (prevents imagenette/tiny-imagenet mixing):**
-- `models/loader.py:dataset_results_path()` rewrites `results/phaseN_results.csv` →
-  `results/<dataset.name>/phaseN_results.csv` at runtime. So tiny-imagenet writes to
-  `results/tiny-imagenet/` and imagenette to `results/imagenette/` — they physically cannot mix.
-- ALWAYS restore/preview/save using the per-dataset path `results/tiny-imagenet/...`, NEVER flat
-  `results/...`. Reading flat `results/phase1_results.csv` finds nothing (silent "not generated")
-  and restoring to flat `results/` breaks resume (scripts read the subfolder). This was a real bug.
-- Checkpoints are flat (`results/checkpoints/{at,atkd}/`, no dataset subfolder) — but their
-  filenames don't encode the dataset, so do NOT reuse a checkpoint dataset across datasets.
+**Per-dataset separation (prevents imagenette/tiny-imagenet mixing) — applies to CSVs,
+checkpoints, AND figures:**
+- `models/loader.py:dataset_results_path()` rewrites CSV paths →
+  `results/<dataset.name>/phaseN_results.csv`.
+- `models/loader.py:dataset_scoped_dir()` rewrites checkpoint/figure DIRS →
+  `results/checkpoints/<dataset.name>/{at,atkd}` and `results/<dataset.name>/figures`.
+  This is required because checkpoint/figure FILENAMES do not encode the dataset (e.g.
+  `at_fp32_epoch07.pt`), so without scoping an int8 checkpoint or a figure from one dataset
+  would silently clobber the other's — a data-integrity bug for the paper.
+- Every consumer routes through these helpers: both defense files (checkpoint WRITE), the phase2/3
+  scripts (checkpoint LOAD for `--skip-training`), and paper_figures/visualize_samples (figure dirs).
+  If you add a new consumer of `paths.checkpoints_*` or `paths.figures_dir`, wrap it in
+  `dataset_scoped_dir(...)` too.
+- ALWAYS restore/preview/save using the per-dataset paths. Reading flat `results/phase1_results.csv`
+  finds nothing (silent "not generated"); restoring to flat dirs breaks resume. This was a real bug.
+- Result of all this: tiny-imagenet and imagenette occupy entirely disjoint subtrees, so saving the
+  whole `results/` tree to one Kaggle dataset can never mix them.
 
 **Suggested session split** (each fits under 12h; set `LEVELS` in Cells 8/9):
 | Session | Work | Approx |
