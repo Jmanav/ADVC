@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Results artifacts — per CLAUDE.md, do not commit weights/checkpoints/CSVs.
+# NOTE: the imagenette figures/CSVs under results/imagenette/ are already tracked
+# and kept intentionally; these rules stop NEW artifacts (checkpoints, phase CSVs,
+# and the tiny-imagenet subtree generated on Kaggle) from being committed.
+results/checkpoints/
+results/*/phase*_results.csv
+results/tiny-imagenet/
+!results/**/.gitkeep
+
+# Datasets / large files
+*.zip
+*.tgz
+*.tar.gz
+tiny-imagenet-200/
+tiny_if/
+imagenette2/
+
+# Env
+.env
+*.log
