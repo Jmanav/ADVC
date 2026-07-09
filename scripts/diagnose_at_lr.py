@@ -1,41 +1,49 @@
 """
 scripts/diagnose_at_lr.py
 
-CHEAP DIAGNOSTIC — is the AT learning rate the reason adversarial training
-failed to recover robustness (and in some cells made it worse)?
+CEILING PROBE — is the AT recipe under-powered for tiny-imagenet, or is a
+frozen-head DeiT-S on tiny-imagenet fundamentally low-signal?
 
-Hypothesis
+Background
 ----------
-The Phase-2 AT run barely moved FGSM robustness (fp32: 0.048 -> 0.140) and made
-int8/int4 *worse*. The AT learning rates in configs/base.yaml (fp32=1e-5,
-int8=5e-6, int4=1e-6), combined with a frozen backbone + only 7 epochs, are
-~50-100x too small to actually learn a defense. This script tests that on the
-clearest case (fp32, biggest LR) as cheaply as possible.
+Phase-2 AT recovered robustness well on imagenette (fp32 fgsm 0.614 -> 0.806) but
+failed on tiny-imagenet (fp32 fgsm 0.048 -> 0.140; int8/int4 got WORSE). The
+identical code + config produced both, so it is not a plain code/LR bug. The
+suspected cause is that tiny-imagenet is a much harder frozen-head transfer task
+(200 classes, 64px upscaled 8x, clean_acc ~0.48) so the gentle last-4-blocks /
+low-LR / 7-epoch recipe has little signal to amplify.
 
-What it does (~10-15 min on a T4, NOT a full rerun)
----------------------------------------------------
-  1. Load DeiT-S fp32.
-  2. Take a 500-image train subset and a 500-image val subset (seed 42).
-  3. Measure FGSM robust_acc BEFORE any AT.
-  4. AT-train 2 epochs at a candidate LR (default 1e-4, override with --lr).
-  5. Measure FGSM robust_acc AFTER.
-  6. Print a verdict.
+This probe settles it cheaply. It runs SHORT AT on a small tiny-imagenet subset
+under escalating recipes and reports FGSM robust_acc before/after each:
 
-It writes NOTHING persistent — no checkpoints, no CSVs. Safe to run in any
-Kaggle session without disturbing real results or resume state.
+  1. baseline  : current config LR, last 4 blocks unfrozen  (reproduces failure)
+  2. higher-lr : lr=1e-4,            last 4 blocks unfrozen
+  3. lr+capacity: lr=1e-4,           last 8 blocks unfrozen
 
-Interpreting the result
-------------------------
-  - Full 7-epoch AT at the OLD lr (1e-5) reached FGSM robust_acc ~0.140.
-  - If 2 epochs at the NEW lr on just 500 images beats that comfortably
-    (e.g. >0.20), the LR was the bottleneck -> bump base.yaml and rerun Phase 2.
-  - If it barely moves, the problem is elsewhere (eval harness / attack scaling)
-    and we investigate before spending 6h on a rerun.
+Reference points: imagenette AT reached 0.806 ("what good looks like"); the failed
+full tiny-imagenet run reached 0.140.
+
+Decision rule (printed as a verdict)
+------------------------------------
+  - If (2) or (3) pushes FGSM robust_acc clearly up (>0.30) -> the recipe was
+    under-powered; apply the winning setting to base.yaml / _freeze_backbone and
+    rerun Phase 2.
+  - If even (3) stays near 0.14 -> frozen-head tiny-imagenet is genuinely
+    low-signal; that is a paper-scope decision, not a code fix. Do NOT spend GPU
+    on a full rerun.
+
+Correctness
+-----------
+Uses `utils.datasets.build_remapped_folder` so tiny-imagenet's 200 wnid folders
+are remapped to their true ImageNet-1000 indices (the frozen 1000-way head needs
+this — a raw ImageFolder would train against 0-199 labels and be meaningless).
+Writes NOTHING persistent: no checkpoints (save_every_epoch=False), no CSVs. Safe
+to run in any Kaggle session without disturbing real results or resume state.
 
 Usage (Kaggle, after Cell 4 data-prep has produced the tiny_if dirs):
-    python scripts/diagnose_at_lr.py                 # lr=1e-4, 2 epochs
-    python scripts/diagnose_at_lr.py --lr 5e-5       # try a different LR
-    python scripts/diagnose_at_lr.py --epochs 3 --n 800
+    python scripts/diagnose_at_lr.py                    # full 3-setting probe (fp32)
+    python scripts/diagnose_at_lr.py --n 800 --epochs 3 # bigger/longer probe
+    python scripts/diagnose_at_lr.py --compression int8 # probe a quantized level
 """
 
 import argparse
@@ -47,23 +55,26 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torchattacks
-import torchvision.transforms as T
 from torch.utils.data import DataLoader, Subset
-from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
 # Resolve project root so sibling packages import cleanly.
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from models.loader import load_config, load_model, resolve_data_path  # noqa: E402
+from models.loader import load_config, load_model  # noqa: E402
+from utils.datasets import (  # noqa: E402
+    build_eval_transform,
+    build_train_transform,
+    build_remapped_folder,
+)
 
 
 class _LogitsWrapper(nn.Module):
     """Unwrap HuggingFace ImageClassifierOutput to a plain (N, C) tensor.
 
     Mirrors the wrapper used in defenses/adversarial_training.py so FGSM sees a
-    plain tensor for both timm (fp32) and HuggingFace (int8/int4) models.
+    plain tensor for both timm (fp32) and HuggingFace-style (int8/int4) models.
     """
 
     def __init__(self, model: nn.Module) -> None:
@@ -99,8 +110,8 @@ def _fgsm_robust_acc(
     """Measure (clean_acc, fgsm_robust_acc) on the loader.
 
     Args:
-        model:  Model to evaluate (eval mode is set internally).
-        loader: DataLoader of ImageNet-normalised (images, labels).
+        model:  Model to evaluate (eval mode set internally, restored after).
+        loader: DataLoader of ImageNet-remapped (images, labels).
         fgsm:   Configured FGSM attack bound to a _LogitsWrapper of `model`.
         device: Device string.
 
@@ -128,17 +139,82 @@ def _fgsm_robust_acc(
     return clean_correct / total, adv_correct / total
 
 
+def _run_setting(
+    name: str,
+    lr: float,
+    unfreeze_blocks: int,
+    cfg: dict,
+    compression: str,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    mean: list,
+    std: list,
+    at_eps: float,
+    epochs: int,
+    device: str,
+) -> dict:
+    """Run one probe setting: fresh model -> measure BEFORE -> short AT -> AFTER.
+
+    Each setting reloads the model from scratch so settings don't contaminate
+    each other. Returns a dict of the measured numbers for the summary table.
+    """
+    from defenses.adversarial_training import adversarial_train
+
+    print("\n" + "-" * 70)
+    print(f">>> Setting '{name}': lr={lr:g}, unfreeze_blocks={unfreeze_blocks}, "
+          f"epochs={epochs}")
+    print("-" * 70)
+
+    _set_seeds(cfg["seed"])  # identical data order / init per setting
+    model = load_model("deit_small", compression, cfg, device=device)
+
+    fgsm_eval = torchattacks.FGSM(_LogitsWrapper(model), eps=at_eps)
+    fgsm_eval.set_normalization_used(mean=mean, std=std)
+    fgsm_eval.set_model_training_mode(model_training=False, batchnorm_training=False)
+
+    clean_b, robust_b = _fgsm_robust_acc(model, val_loader, fgsm_eval, device)
+    print(f"[{name}] BEFORE AT  clean={clean_b:.4f}  fgsm_robust={robust_b:.4f}")
+
+    diag_cfg = {
+        **cfg,
+        "defense": {
+            **cfg["defense"],
+            "epochs": epochs,
+            "lr": lr,                 # scalar -> used directly for any compression
+            "save_every_epoch": False,  # write nothing to disk
+        },
+    }
+    adversarial_train(
+        model, train_loader, diag_cfg,
+        compression=compression,
+        num_unfrozen_blocks=unfreeze_blocks,
+    )
+
+    clean_a, robust_a = _fgsm_robust_acc(model, val_loader, fgsm_eval, device)
+    print(f"[{name}] AFTER  AT  clean={clean_a:.4f}  fgsm_robust={robust_a:.4f}")
+
+    # Free GPU memory before the next setting reloads a fresh model.
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return {
+        "name": name, "lr": lr, "blocks": unfreeze_blocks,
+        "clean_before": clean_b, "robust_before": robust_b,
+        "clean_after": clean_a, "robust_after": robust_a,
+    }
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Cheap AT learning-rate diagnostic.")
-    ap.add_argument("--lr", type=float, default=1e-4,
-                    help="Candidate AT learning rate to test (default 1e-4).")
+    ap = argparse.ArgumentParser(description="AT ceiling probe for tiny-imagenet.")
     ap.add_argument("--epochs", type=int, default=2,
-                    help="AT epochs for the diagnostic (default 2).")
+                    help="AT epochs per setting (default 2 — cheap).")
     ap.add_argument("--n", type=int, default=500,
-                    help="Train/val subset size (default 500 each).")
+                    help="Train/val subset size per split (default 500 each).")
     ap.add_argument("--compression", default="fp32",
                     choices=["fp32", "int8", "int4"],
-                    help="Compression level to test (default fp32 — clearest signal).")
+                    help="Compression level (default fp32 — most trainable capacity, "
+                         "clearest signal).")
     args = ap.parse_args()
 
     cfg = load_config(str(_ROOT / "configs/base.yaml"))
@@ -150,25 +226,23 @@ def main() -> None:
     ds_cfg = cfg["dataset"]
     mean, std = ds_cfg["mean"], ds_cfg["std"]
     at_eps = cfg["defense"]["at_eps"]
+    base_lr_cfg = cfg["defense"]["lr"]
+    base_lr = (base_lr_cfg[args.compression]
+               if isinstance(base_lr_cfg, dict) else base_lr_cfg)
 
-    transform = T.Compose([
-        T.Resize(ds_cfg["resize"]),
-        T.CenterCrop(ds_cfg["image_size"]),
-        T.ToTensor(),
-        T.Normalize(mean=mean, std=std),
-    ])
+    print(f"=== AT ceiling probe — dataset={ds_cfg['name']} "
+          f"compression={args.compression} n={args.n} epochs={args.epochs} ===")
+    print(f"    config baseline lr for {args.compression} = {base_lr:g}\n")
 
-    print(f"=== AT LR diagnostic — {args.compression}, lr={args.lr}, "
-          f"{args.epochs} epoch(s), n={args.n} ===\n")
+    # Build remapped datasets ONCE (labels -> ImageNet-1000 indices).
+    train_full = build_remapped_folder(ds_cfg["train_dir"],
+                                        build_train_transform(cfg), cfg)
+    val_full = build_remapped_folder(ds_cfg["val_dir"],
+                                     build_eval_transform(cfg), cfg)
 
     # Deterministic subsets (seed already set).
-    train_full = ImageFolder(str(resolve_data_path(_ROOT, ds_cfg["train_dir"])),
-                             transform=transform)
-    val_full = ImageFolder(str(resolve_data_path(_ROOT, ds_cfg["val_dir"])),
-                           transform=transform)
     train_idx = random.sample(range(len(train_full)), min(args.n, len(train_full)))
     val_idx = random.sample(range(len(val_full)), min(args.n, len(val_full)))
-
     train_loader = DataLoader(Subset(train_full, train_idx),
                               batch_size=cfg["defense"]["batch_size"],
                               shuffle=True, num_workers=2)
@@ -176,57 +250,56 @@ def main() -> None:
                             batch_size=cfg["eval"]["batch_size"],
                             shuffle=False, num_workers=2)
 
-    model = load_model("deit_small", args.compression, cfg, device=device)
+    settings = [
+        ("baseline",    base_lr, 4),
+        ("higher-lr",   1e-4,    4),
+        ("lr+capacity", 1e-4,    8),
+    ]
+    results = [
+        _run_setting(name, lr, blocks, cfg, args.compression,
+                     train_loader, val_loader, mean, std, at_eps,
+                     args.epochs, device)
+        for (name, lr, blocks) in settings
+    ]
 
-    # FGSM for EVAL (bound to eval model) and one for TRAIN (bound to same model
-    # via wrapper). Both use set_normalization_used so eps is applied in pixel space.
-    fgsm_eval = torchattacks.FGSM(_LogitsWrapper(model), eps=at_eps)
-    fgsm_eval.set_normalization_used(mean=mean, std=std)
-    fgsm_eval.set_model_training_mode(model_training=False, batchnorm_training=False)
+    # ---- Summary table ----
+    IMAGENETTE_AT = 0.806   # imagenette fp32 AT fgsm — "what good looks like"
+    FAILED_TINY = 0.140     # failed full tiny-imagenet fp32 AT fgsm
+    print("\n" + "=" * 70)
+    print("SUMMARY — FGSM robust_acc (subset, tiny-imagenet)")
+    print("=" * 70)
+    print(f"{'setting':<13} {'lr':>8} {'blk':>4} {'clean→':>8} "
+          f"{'robust:before→after':>22}")
+    for r in results:
+        print(f"{r['name']:<13} {r['lr']:>8.0e} {r['blocks']:>4} "
+              f"{r['clean_after']:>8.3f} "
+              f"   {r['robust_before']:.3f} → {r['robust_after']:.3f}")
+    print(f"\nreference: imagenette AT reached {IMAGENETTE_AT:.3f}; "
+          f"failed tiny full run reached {FAILED_TINY:.3f}")
 
-    # ---- BEFORE ----
-    clean_b, robust_b = _fgsm_robust_acc(model, val_loader, fgsm_eval, device)
-    print(f"[BEFORE AT]  clean_acc={clean_b:.4f}  fgsm_robust_acc={robust_b:.4f}\n")
-
-    # ---- AT train (reuse the real training routine, overriding lr + epochs) ----
-    from defenses.adversarial_training import adversarial_train
-
-    diag_cfg = {
-        **cfg,
-        "defense": {
-            **cfg["defense"],
-            "epochs": args.epochs,
-            # Force a scalar lr so adversarial_train uses it directly for any level.
-            "lr": args.lr,
-            "save_every_epoch": False,   # write nothing to disk
-        },
-    }
-    model = adversarial_train(model, train_loader, diag_cfg,
-                              compression=args.compression)
-
-    # ---- AFTER ----
-    clean_a, robust_a = _fgsm_robust_acc(model, val_loader, fgsm_eval, device)
-    print(f"\n[AFTER AT]   clean_acc={clean_a:.4f}  fgsm_robust_acc={robust_a:.4f}")
-
-    # ---- Verdict ----
-    OLD_LR_FULL_RUN = 0.140   # what full 7-epoch AT at old lr reached (fp32 fgsm)
-    delta = robust_a - robust_b
-    print("\n" + "=" * 60)
-    print(f"FGSM robust_acc:  before={robust_b:.4f}  ->  after={robust_a:.4f}"
-          f"  (Δ={delta:+.4f})")
-    print(f"Reference: full 7-epoch AT at OLD lr reached ~{OLD_LR_FULL_RUN:.3f}")
-    if robust_a > OLD_LR_FULL_RUN + 0.05:
-        print("VERDICT: ✅ LR was the bottleneck. Just 2 epochs on "
-              f"{args.n} images at lr={args.lr} already beat the full old-lr run.")
-        print("         -> Bump defense.lr in base.yaml and rerun Phase 2.")
-    elif delta > 0.03:
-        print("VERDICT: ⚠️  Higher LR helps but not dramatically. Consider a "
-              "larger LR or more epochs before a full rerun.")
+    best = max(results, key=lambda r: r["robust_after"])
+    print("\n" + "=" * 70)
+    if best["robust_after"] > 0.30:
+        print(f"VERDICT: ✅ RECIPE WAS UNDER-POWERED. Best setting '{best['name']}' "
+              f"(lr={best['lr']:g}, {best['blocks']} blocks) reached "
+              f"fgsm_robust={best['robust_after']:.3f} on the subset — well above "
+              f"the failed 0.14.")
+        print("         -> Apply that recipe (base.yaml defense.lr and/or "
+              "defense.num_unfrozen_blocks) and rerun Phase 2.")
+    elif best["robust_after"] > FAILED_TINY + 0.05:
+        print(f"VERDICT: ⚠️  PARTIAL. Best '{best['name']}' reached "
+              f"{best['robust_after']:.3f} — better than 0.14 but modest. "
+              "Consider an even stronger recipe (higher lr / more blocks / more "
+              "epochs) before committing to a full rerun.")
     else:
-        print("VERDICT: ❌ LR does NOT appear to be the bottleneck. Robustness "
-              "barely moved. Investigate the eval harness / attack scaling "
-              "before spending GPU on a full Phase 2 rerun.")
-    print("=" * 60)
+        print(f"VERDICT: ❌ LOW-SIGNAL SETTING. Even the strongest probe "
+              f"('{best['name']}') only reached {best['robust_after']:.3f}, near "
+              f"the failed 0.14. Frozen-head tiny-imagenet appears fundamentally "
+              "hard for this AT recipe.")
+        print("         -> This is a PAPER-SCOPE decision, not a code fix. Options: "
+              "retrain the head, report the low numbers as a finding, or keep "
+              "imagenette primary. Do NOT spend GPU on a full Phase-2 rerun yet.")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

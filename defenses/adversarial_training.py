@@ -228,8 +228,8 @@ def save_checkpoint(
 # Layer-freeze helper
 # ---------------------------------------------------------------------------
 
-def _freeze_backbone(model: nn.Module) -> None:
-    """Freeze all layers, then unfreeze the last 4 transformer blocks and head.
+def _freeze_backbone(model: nn.Module, num_unfrozen_blocks: int = 4) -> None:
+    """Freeze all layers, then unfreeze the last N transformer blocks and head.
 
     Handles HuggingFace ViT models (model.vit.encoder.layer / model.classifier),
     HuggingFace models with model.encoder.layer, and timm FP32 models
@@ -240,6 +240,10 @@ def _freeze_backbone(model: nn.Module) -> None:
 
     Args:
         model: The compressed model whose backbone should be frozen.
+        num_unfrozen_blocks: How many of the final transformer blocks to unfreeze
+            (default 4 — the original behaviour). The classifier head is always
+            unfrozen regardless of this value. Used by the AT ceiling diagnostic
+            to test whether more trainable capacity recovers robustness.
 
     Raises:
         ValueError: If the model architecture cannot be detected.
@@ -265,8 +269,9 @@ def _freeze_backbone(model: nn.Module) -> None:
         if param.dtype in (torch.float32, torch.float16, torch.bfloat16):
             param.requires_grad = False
 
-    # Unfreeze last 4 blocks — float params only.
-    for block in list(blocks)[-4:]:
+    # Unfreeze last N blocks — float params only.
+    unfrozen = list(blocks)[-num_unfrozen_blocks:] if num_unfrozen_blocks > 0 else []
+    for block in unfrozen:
         for param in block.parameters():
             if param.dtype in (torch.float32, torch.float16, torch.bfloat16):
                 param.requires_grad = True
@@ -291,6 +296,7 @@ def adversarial_train(
     train_loader: torch.utils.data.DataLoader,
     config: dict,
     compression: str = "fp32",
+    num_unfrozen_blocks: int | None = None,
 ) -> nn.Module:
     """Fine-tune an already-compressed model using FGSM adversarial inputs.
 
@@ -310,6 +316,11 @@ def adversarial_train(
         config:       Parsed base.yaml config dict.
         compression:  Compression level string used to name checkpoint files.
                       One of "fp32", "int8", "int4".
+        num_unfrozen_blocks: Override for how many final transformer blocks to
+                      unfreeze. If None (default), falls back to
+                      config["defense"].get("num_unfrozen_blocks", 4), preserving
+                      the original last-4-blocks behaviour. Used by the AT ceiling
+                      diagnostic.
 
     Returns:
         model: The same nn.Module, fine-tuned in place, returned in eval mode.
@@ -358,8 +369,13 @@ def adversarial_train(
     fgsm = torchattacks.FGSM(_LogitsWrapper(model), eps=at_eps)
     fgsm.set_normalization_used(mean=mean, std=std)
 
-    # Freeze backbone — only last 4 blocks + head will receive gradient updates.
-    _freeze_backbone(model)
+    # Freeze backbone — only last N blocks + head receive gradient updates.
+    # Resolution order: explicit arg > config override > original default (4).
+    if num_unfrozen_blocks is None:
+        n_unfrozen = int(defense_cfg.get("num_unfrozen_blocks", 4))
+    else:
+        n_unfrozen = int(num_unfrozen_blocks)
+    _freeze_backbone(model, num_unfrozen_blocks=n_unfrozen)
 
     # Build optimizer over trainable params only.
     trainable_params = [p for p in model.parameters() if p.requires_grad]
