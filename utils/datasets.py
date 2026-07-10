@@ -139,17 +139,27 @@ def synset_to_imagenet_map(cfg: dict) -> dict[str, int]:
 def remap_subset_labels(dataset: ImageFolder, cfg: dict) -> ImageFolder:
     """Remap ImageFolder targets to ImageNet-1k indices for subset datasets.
 
-    No-op when the dataset already has 1000 classes (full ImageNet). Unknown
-    synsets fall back to their original ImageFolder label (matching the prior
-    per-file behaviour).
+    No-op when:
+      - the active dataset uses `label_mode: raw` (the model has a fine-tuned
+        K-way head, so raw 0..K-1 ImageFolder labels are correct — e.g.
+        tiny-imagenet with a fine-tuned 200-way head), or
+      - the dataset already has >= 1000 classes (full ImageNet).
+
+    Otherwise (label_mode `imagenet`, the default) each folder's synset is mapped
+    to its ImageNet-1k index so the frozen pretrained 1000-way head works with no
+    fine-tuning. Unknown synsets fall back to their original ImageFolder label.
 
     Args:
         dataset: An ImageFolder over a subset of ImageNet-1k.
-        cfg: Parsed base.yaml config selecting which synset map to use.
+        cfg: Parsed base.yaml config selecting label_mode / synset map.
 
     Returns:
-        The same dataset object with `.samples` / `.targets` remapped.
+        The same dataset object with `.samples` / `.targets` remapped (or unchanged
+        under label_mode: raw).
     """
+    # label_mode: raw → keep contiguous 0..K-1 labels for a fine-tuned K-way head.
+    if cfg["dataset"].get("label_mode", "imagenet") == "raw":
+        return dataset
     if len(dataset.classes) >= 1000:
         return dataset
     mapping = synset_to_imagenet_map(cfg)

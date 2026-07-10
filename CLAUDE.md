@@ -2,9 +2,35 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 ---
 
+### Per-dataset head: frozen ImageNet (imagenette) vs fine-tuned (tiny-imagenet)
+
+DeiT-S loads with a pretrained 1000-way ImageNet head. Two regimes, selected by
+per-dataset keys in `configs/base.yaml` (`num_classes`, `label_mode`, `finetuned_base`):
+
+- **imagenette** — `num_classes: 1000`, `label_mode: imagenet`, no `finetuned_base`.
+  Its 10 folders ARE ImageNet classes, so the FROZEN head classifies them directly
+  (`utils/datasets.py` remaps the 10 folders → true ImageNet indices). No fine-tune.
+- **tiny-imagenet** — `num_classes: 200`, `label_mode: raw`, `finetuned_base` set.
+  The frozen head fails here (64px→224, clean_acc ~0.48, AT can't recover robustness
+  — a ceiling probe confirmed no AT recipe fixes it). So DeiT-S is FIRST fine-tuned
+  with a fresh 200-way head via `scripts/finetune_backbone.py`, and every subsequent
+  `load_model()` applies that checkpoint BEFORE compression (int8/int4 quantise the
+  fine-tuned weights, not the raw pretrained ones). Labels stay raw 0..199 (no remap).
+
+`models/loader.py:load_model()` reads all three keys; `_resolve_finetuned_path()`
+scopes the checkpoint by dataset name. AT+KD teacher and student both come from
+`load_model(...)`, so they automatically share the fine-tuned 200-way head (KD over
+200 logits). Adding a new fine-tuned dataset = add its sub-block + run the fine-tune.
+
 ### Running experiments (on Kaggle — scripts are not meant to run locally)
 
 ```bash
+# Step 0 (tiny-imagenet ONLY) — fine-tune the 200-way head FIRST. Produces
+# results/checkpoints/tiny-imagenet/base/deit_small_ft.pt, which load_model()
+# then applies before every compression level. Skip for imagenette.
+python scripts/finetune_backbone.py                 # full fine-tune (config: finetune.epochs)
+python scripts/finetune_backbone.py --epochs 1 --n 4000   # cheap sanity run first
+
 # Phase 1 — baseline, no defense
 python experiments/eval_phase1.py --model deit_small
 

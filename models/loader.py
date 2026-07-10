@@ -124,13 +124,25 @@ def load_model(
     """
     model_cfg = config["models"][model_name]
     timm_name = model_cfg["timm_name"]
+    # Head width: prefer the active dataset's num_classes (e.g. tiny-imagenet=200
+    # with a fine-tuned head), falling back to 1000 (frozen ImageNet head).
+    num_classes = int(config["dataset"].get("num_classes", 1000))
+
+    # Resolve+load the fine-tuned base state_dict once (None if not configured).
+    # int8/int4 need it BEFORE quantisation, so it is passed into those loaders;
+    # fp32 applies it after construction.
+    finetuned_state = _load_finetuned_state(config, device)
 
     if compression == "fp32":
-        model = _load_fp32(timm_name, device)
+        model = _load_fp32(timm_name, device, num_classes)
+        if finetuned_state is not None:
+            missing, unexpected = model.load_state_dict(finetuned_state, strict=False)
+            print(f"[loader] FP32: applied fine-tuned base "
+                  f"(missing={len(missing)}, unexpected={len(unexpected)})")
     elif compression == "int8":
-        model = _load_int8(timm_name, device)
+        model = _load_int8(timm_name, device, num_classes, finetuned_state)
     elif compression == "int4":
-        model = _load_int4(timm_name, config, device)
+        model = _load_int4(timm_name, config, device, num_classes, finetuned_state)
     else:
         raise ValueError(
             f"Unknown compression level: {compression!r}. "
@@ -141,14 +153,63 @@ def load_model(
     return model
 
 
-def _load_fp32(timm_name: str, device: str) -> torch.nn.Module:
-    """Load full-precision model via timm."""
-    model = timm.create_model(timm_name, pretrained=True)
+def _resolve_finetuned_path(config: dict) -> Path | None:
+    """Resolve the dataset-scoped fine-tuned base checkpoint path, or None.
+
+    `finetuned_base` in config (e.g. "results/checkpoints/base/deit_small_ft.pt")
+    is scoped by dataset name to
+    "results/checkpoints/<name>/base/deit_small_ft.pt", mirroring
+    dataset_scoped_dir. Returns None when the key is absent (imagenette keeps the
+    frozen ImageNet head — no fine-tuned base).
+
+    Raises:
+        FileNotFoundError: if the key is set but no checkpoint exists on disk.
+    """
+    ds_cfg = config["dataset"]
+    ft_rel = ds_cfg.get("finetuned_base")
+    if not ft_rel:
+        return None
+
+    p = Path(ft_rel)
+    scoped = p.parent.parent / ds_cfg["name"] / p.parent.name / p.name
+    project_root = Path(__file__).resolve().parent.parent
+    candidates = [Path(os.getcwd()) / scoped, project_root / scoped, Path(scoped)]
+    for c in candidates:
+        if c.is_file():
+            return c
+    tried = "\n  ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f"finetuned_base checkpoint not found. Tried:\n  {tried}\n"
+        "Run scripts/finetune_backbone.py first to produce it."
+    )
+
+
+def _load_finetuned_state(config: dict, device: str) -> dict | None:
+    """Load the fine-tuned base state_dict for the active dataset, or None."""
+    path = _resolve_finetuned_path(config)
+    if path is None:
+        return None
+    print(f"[loader] Loading fine-tuned base state_dict from {path}")
+    return torch.load(str(path), map_location=device)
+
+
+def _load_fp32(timm_name: str, device: str, num_classes: int = 1000) -> torch.nn.Module:
+    """Load full-precision model via timm.
+
+    num_classes controls the head width — 1000 keeps the pretrained ImageNet head
+    (imagenette), a smaller value swaps in a fresh K-way head (tiny-imagenet=200).
+    """
+    model = timm.create_model(timm_name, pretrained=True, num_classes=num_classes)
     model = model.to(device)
     return model
 
 
-def _load_int8(timm_name: str, device: str) -> torch.nn.Module:
+def _load_int8(
+    timm_name: str,
+    device: str,
+    num_classes: int = 1000,
+    finetuned_state: dict | None = None,
+) -> torch.nn.Module:
     """
     Load INT8 quantized model via bitsandbytes Linear8bitLt.
 
@@ -159,10 +220,21 @@ def _load_int8(timm_name: str, device: str) -> torch.nn.Module:
     so bitsandbytes can populate the .CB quantized buffer on the first forward
     pass. We build the layer on CPU, move to CUDA, then run a dummy forward pass
     to trigger quantization before any downstream code touches the weights.
+
+    If `finetuned_state` is given, it is loaded into the FP32 model BEFORE Linear
+    replacement, so quantisation is applied to the fine-tuned weights (loading it
+    after quantisation would be lost). num_classes sets the head width first.
     """
     import bitsandbytes as bnb
 
-    model = timm.create_model(timm_name, pretrained=True)
+    model = timm.create_model(timm_name, pretrained=True, num_classes=num_classes)
+
+    # Load fine-tuned float weights BEFORE quantising, so int8 quantises the
+    # fine-tuned model (not the raw pretrained one).
+    if finetuned_state is not None:
+        missing, unexpected = model.load_state_dict(finetuned_state, strict=False)
+        print(f"[loader] INT8: applied fine-tuned base pre-quant "
+              f"(missing={len(missing)}, unexpected={len(unexpected)})")
 
     def _replace_linear_int8(module: torch.nn.Module) -> None:
         for name, child in module.named_children():
@@ -199,12 +271,20 @@ def _load_int8(timm_name: str, device: str) -> torch.nn.Module:
     return model
 
 
-def _load_int4(timm_name: str, config: dict, device: str) -> torch.nn.Module:
+def _load_int4(
+    timm_name: str,
+    config: dict,
+    device: str,
+    num_classes: int = 1000,
+    finetuned_state: dict | None = None,
+) -> torch.nn.Module:
     """
     Load INT4 (NF4) quantized model.
 
     Same strategy as INT8: load FP32 via timm then replace nn.Linear layers
-    with bitsandbytes Linear4bit (NF4) in-place.
+    with bitsandbytes Linear4bit (NF4) in-place. If `finetuned_state` is given it
+    is loaded into the FP32 model BEFORE Linear replacement so NF4 quantises the
+    fine-tuned weights. num_classes sets the head width first.
     """
     import bitsandbytes as bnb
 
@@ -216,7 +296,14 @@ def _load_int4(timm_name: str, config: dict, device: str) -> torch.nn.Module:
     )
     quant_type = int4_cfg["bnb_4bit_quant_type"]  # "nf4"
 
-    model = timm.create_model(timm_name, pretrained=True)
+    model = timm.create_model(timm_name, pretrained=True, num_classes=num_classes)
+
+    # Load fine-tuned float weights BEFORE quantising (see _load_int8).
+    if finetuned_state is not None:
+        missing, unexpected = model.load_state_dict(finetuned_state, strict=False)
+        print(f"[loader] INT4: applied fine-tuned base pre-quant "
+              f"(missing={len(missing)}, unexpected={len(unexpected)})")
+
     model = model.to(device)
 
     def _replace_linear_int4(module: torch.nn.Module) -> None:

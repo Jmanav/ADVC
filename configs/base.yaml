@@ -37,6 +37,11 @@ dataset:
   std: [0.229, 0.224, 0.225]
 
   imagenette:
+    # imagenette's 10 folders ARE ImageNet-1k classes, so the frozen pretrained
+    # 1000-way head classifies them directly (label_mode: imagenet remaps the 10
+    # folders → their true ImageNet indices). No fine-tuning needed.
+    num_classes: 1000
+    label_mode: imagenet
     resize: 256             # Resize(256) → CenterCrop(224) — standard ImageNet preprocessing
     val_subset_size: 3925   # ImageNette val has ~3925 images total — use all of them
     train_subset_size: 9469  # ImageNette train has ~9469 images total — use all of them
@@ -46,6 +51,17 @@ dataset:
     train_dir: "/kaggle/working/imagenette2/train"
 
   tiny-imagenet:
+    # tiny-imagenet's 200 classes at 64px→224 are too degraded for the frozen
+    # ImageNet head (clean_acc ~0.48, AT can't recover robustness). Instead we
+    # fine-tune DeiT-S with a fresh 200-way head (scripts/finetune_backbone.py)
+    # and use RAW 0..199 ImageFolder labels (no ImageNet remap).
+    num_classes: 200
+    label_mode: raw
+    # Fine-tuned base checkpoint (state_dict). Produced by finetune_backbone.py,
+    # loaded by models/loader.py as the base BEFORE compression + defense. The
+    # <dataset> segment is inserted at runtime by dataset_scoped_dir-style logic;
+    # keep this path dataset-agnostic here.
+    finetuned_base: "results/checkpoints/base/deit_small_ft.pt"
     resize: 224             # native 64px → 224 direct; 256+crop would discard real content
     val_subset_size: 10000  # Tiny-ImageNet val has 10000 images (50/class × 200)
     train_subset_size: 100000  # Tiny-ImageNet train has 100000 images (500/class × 200)
@@ -77,6 +93,14 @@ patch:
   patch_size: 32    # 32x32 patch on 224x224 image (~2% of image area)
   steps: 150        # patch needs more steps than PGD
   lr: 0.05
+
+# Supervised fine-tune (produces the finetuned_base checkpoint for datasets whose
+# frozen ImageNet head is inadequate, e.g. tiny-imagenet). Non-adversarial.
+finetune:
+  epochs: 5
+  lr: 0.0001
+  weight_decay: 0.05
+  batch_size: 64
 
 # Defense - Adversarial Training (AT)
 defense:
