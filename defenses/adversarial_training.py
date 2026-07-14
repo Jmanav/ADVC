@@ -406,8 +406,6 @@ def adversarial_train(
     # Raises ValueError immediately if L-inf is outside at_eps ± 10%.
     _check_fgsm_perturbation(fgsm, train_loader, at_eps, model_device, mean, std)
 
-    baseline_clean_acc = 0.0  # baseline check skipped — diagnostic only
-
     # 500-image subset loader for per-epoch clean-acc checks.
     epoch_clean_loader = DataLoader(
         Subset(train_loader.dataset, range(500)),
@@ -416,6 +414,11 @@ def adversarial_train(
         num_workers=0,
         pin_memory=False,
     )
+
+    # Measure pre-training clean accuracy on the same subset so per-epoch
+    # drift is comparable against the model's actual starting point (not 0).
+    baseline_clean_acc = _measure_clean_acc(model, epoch_clean_loader, str(model_device))
+    print(f"[AT] Pre-training baseline clean_acc={baseline_clean_acc:.4f} (500-image subset)")
 
     _first_batch_checked = False
 

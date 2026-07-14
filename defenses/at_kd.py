@@ -427,8 +427,6 @@ def at_kd_train(
     # Raises ValueError immediately if L-inf is outside at_eps ± 10%.
     _check_fgsm_perturbation(fgsm, train_loader, at_eps, str(student_device), mean, std)
 
-    baseline_clean_acc = 0.0  # baseline check skipped — diagnostic only
-
     # 500-image subset loader for per-epoch clean-acc checks.
     epoch_clean_loader = DataLoader(
         Subset(train_loader.dataset, range(500)),
@@ -437,6 +435,11 @@ def at_kd_train(
         num_workers=0,
         pin_memory=False,
     )
+
+    # Measure pre-training clean accuracy on the same subset so per-epoch
+    # drift is comparable against the student's actual starting point (not 0).
+    baseline_clean_acc = _measure_clean_acc(student, epoch_clean_loader, str(student_device))
+    print(f"[AT+KD] Pre-training baseline clean_acc={baseline_clean_acc:.4f} (500-image subset)")
 
     _first_batch_checked = False
 
