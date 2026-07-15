@@ -316,21 +316,73 @@ Implemented in `attacks/combined.py`.
 
 ### Defense 1 — Adversarial Training (AT)
 
-Fine-tune the already-compressed model on FGSM adversarial inputs.
+Fine-tune the already-compressed model on FGSM adversarial inputs. Backbone is
+frozen except the last `num_unfrozen_blocks` transformer blocks (default 4) +
+classifier head — see `_freeze_backbone()` in `defenses/adversarial_training.py`.
 
-AT parameters:
-- Optimizer: SGD, lr=0.01, momentum=0.9, weight_decay=1e-4
+AT parameters (actual, `configs/base.yaml` → `defense`):
+- Optimizer: AdamW, weight_decay=0.01
+- LR: per-compression (`defense.lr.{fp32,int8,int4}` = 1e-5 / 5e-6 / 1e-6) —
+  quantized weights are fragile, INT4 gets 10× lower LR than FP32
+- Warmup: epoch 1 runs at lr/10, full lr from epoch 2 (`defense.warmup_epochs`)
 - Epochs: 7
 - AT epsilon: 8/255 — must always match attack epsilon
-- Checkpoint: save after every epoch to `results/checkpoints/at/` AND Drive
+- Checkpoint: save after every epoch to `results/checkpoints/<dataset>/at/`
+  (see "Kaggle multi-session workflow" for the per-dataset scoping)
+
+**FGSM-RS + clean/adversarial batch mixing (`defense.random_start`,
+`defense.clean_batch_frac` — default `true` / `0.5`):**
+
+Pure single-step FGSM AT (100% of every batch adversarial, FGSM step taken
+directly from the clean image, no random start) is a documented failure mode:
+Wong et al., 2020, *"Fast is Better than Free: Revisiting Adversarial
+Training"* (ICLR 2020, arXiv:2001.03994) shows this setup lets the model
+exploit local linearity around the clean input to trivially "solve" the
+single-step attack without learning genuinely robust features —
+**catastrophic overfitting**. Symptoms: training-time adversarial accuracy
+looks fine, but PGD (multi-step) robust accuracy collapses toward 0, and
+clean accuracy can collapse as a side effect since the model was never
+anchored to the real data distribution.
+
+This project hit this exact failure on tiny-imagenet's fine-tuned 200-way
+head: fp32 AT collapsed `clean_acc` 0.857→0.39 and `pgd_robust_acc`→0.0,
+reproducibly across two independent runs (2026-07-11 and 2026-07-14/15,
+same config, same result). The fix implemented (both `adversarial_training.py`
+and `at_kd.py`) combines two mitigations from the AT robustness literature:
+- **Random start (FGSM-RS)**: perturb from a uniformly random point inside
+  the L∞ eps-ball (in pixel space) before taking the FGSM gradient step,
+  instead of starting from the clean image. This is the specific fix Wong et
+  al. (2020) identify for catastrophic overfitting in single-step AT.
+- **Clean/adversarial batch mixing** (`clean_batch_frac=0.5`): half of every
+  training batch is left unperturbed. This is a complementary, not redundant,
+  mitigation — it protects clean accuracy specifically by keeping the decision
+  boundary anchored to the real data distribution, whereas random-start fixes
+  the adversarial-example quality itself. Neither alone addresses what the
+  other does.
+
+This is a deliberate, documented deviation from vanilla single-step FGSM AT —
+cite it in the paper's methodology as "FGSM-RS with 50% clean/adversarial
+batch mixing," not plain "FGSM adversarial training."
+
+**Guardrail history:** both defense scripts print
+`[AT] Pre-training baseline clean_acc=...` before epoch 1 and warn loudly
+(`*** WARNING: clean_acc dropped ... ***`) if any epoch's clean_acc falls
+>15% below that baseline. Prior to 2026-07-14 this baseline was hardcoded to
+`0.0` (`baseline_clean_acc = 0.0  # baseline check skipped — diagnostic only`),
+which meant the drop was always computed against 0 and the warning could
+never fire — the fp32 AT collapse ran to completion undetected. Fixed by
+measuring the real baseline via `_measure_clean_acc()` before training starts.
 
 ### Defense 2 — Adversarial Training + Knowledge Distillation (AT+KD)
 
 Fine-tune compressed student using adversarial inputs and FP32 teacher soft labels.
+Same FGSM-RS + batch-mixing treatment as AT above applies here — the teacher
+and student both see whatever `adv_images` ends up containing (mixed clean +
+random-start-FGSM), so the CE and KL loss terms stay consistent with each other.
 
 Loss function:
 ```
-adv_images   = FGSM(student, images, labels, eps=8/255)
+adv_images   = FGSM(student, images_or_random_start, labels, eps=8/255)  # 50% clean, 50% adversarial
 teacher_soft = softmax(teacher(adv_images) / temperature)   # no gradients
 student_soft = softmax(student(adv_images) / temperature)
 
@@ -339,11 +391,11 @@ loss = alpha * CrossEntropy(student(adv_images), true_labels)
 ```
 
 AT+KD parameters:
-- All AT params above, plus:
+- All AT params above (including FGSM-RS + batch-mixing), plus:
 - Temperature: 4.0
 - Alpha: 0.5
 - Teacher: FP32 DeiT-S, frozen throughout — never update teacher weights
-- Checkpoint: save after every epoch to `results/checkpoints/atkd/` AND Drive
+- Checkpoint: save after every epoch to `results/checkpoints/<dataset>/atkd/`
 
 ---
 
@@ -565,3 +617,7 @@ Update this manually after each experiment run. Kaggle free tier: 30 GPU h/week 
 - AT+KD performs worse than AT → teacher not frozen or temperature wrong
 - ASR = 0.0 or 1.0 for any cell → implementation bug, do not include in paper
 - T4 GPU not available → do not run on CPU; wait for Kaggle GPU quota to reset
+- clean_acc collapses >15% after AT/AT+KD training AND pgd_robust_acc≈0 →
+  catastrophic overfitting (see "Defense 1 — Adversarial Training (AT)" above,
+  Wong et al. 2020). The per-epoch guardrail prints
+  `*** WARNING: clean_acc dropped ... ***` when this happens — do not ignore it.

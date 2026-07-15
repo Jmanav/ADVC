@@ -119,6 +119,16 @@ defense:
   batch_size: 16     # T4 16GB — keep at 16 for training stability
   at_eps: 0.03137    # 8/255 — must match attack epsilon
   save_every_epoch: true
+  # FGSM-RS (Wong et al. 2020, "Fast is better than free"): start the FGSM
+  # step from a random point inside the eps-ball instead of the clean image.
+  # Mitigates catastrophic overfitting, the documented failure mode of pure
+  # single-step FGSM AT (model exploits local linearity around clean images,
+  # collapsing clean_acc and PGD robustness while train_adv_acc looks fine).
+  random_start: true
+  # Fraction of each batch trained on the ORIGINAL clean images instead of
+  # adversarial ones (0.0 = pure AT, matches the original spec). Keeps the
+  # decision boundary anchored to the clean data distribution.
+  clean_batch_frac: 0.5
 
 # Defense - AT + Knowledge Distillation (AT+KD)
 at_kd:

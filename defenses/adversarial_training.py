@@ -335,6 +335,8 @@ def adversarial_train(
     at_eps: float          = defense_cfg["at_eps"]
     warmup_epochs: int     = int(defense_cfg.get("warmup_epochs", 1))
     save_every_epoch: bool = defense_cfg.get("save_every_epoch", True)
+    random_start: bool     = bool(defense_cfg.get("random_start", True))
+    clean_batch_frac: float = float(defense_cfg.get("clean_batch_frac", 0.0))
     mean: list             = ds_cfg["mean"]
     std: list              = ds_cfg["std"]
 
@@ -399,12 +401,18 @@ def adversarial_train(
     print(f"[AT] optimizer    : AdamW  lr={lr}  weight_decay={weight_decay}")
     print(f"[AT] warmup_epochs: {warmup_epochs}  (epoch 1 uses lr={lr * 0.1:.2e})")
     print(f"[AT] at_eps       : {at_eps:.5f}  ({round(at_eps * 255)}/255)")
+    print(f"[AT] random_start : {random_start}  (FGSM-RS — mitigates catastrophic overfitting)")
+    print(f"[AT] clean_batch_frac: {clean_batch_frac}  (fraction of each batch left unperturbed)")
     print(f"[AT] checkpoints  : {ckpt_dir}")
     print()
 
     # Verify FGSM produces correct perturbations BEFORE any epoch runs.
     # Raises ValueError immediately if L-inf is outside at_eps ± 10%.
     _check_fgsm_perturbation(fgsm, train_loader, at_eps, model_device, mean, std)
+
+    # Precompute mean/std tensors for pixel-space clamping during random-start.
+    mean_t = torch.tensor(mean, dtype=torch.float32, device=model_device).view(1, 3, 1, 1)
+    std_t  = torch.tensor(std,  dtype=torch.float32, device=model_device).view(1, 3, 1, 1)
 
     # 500-image subset loader for per-epoch clean-acc checks.
     epoch_clean_loader = DataLoader(
@@ -453,10 +461,40 @@ def adversarial_train(
                     f"(ImageNet normalized — expected)\n"
                 )
 
-            # Generate FGSM adversarial examples.
-            # torchattacks temporarily sets model.eval() internally, then
-            # restores training mode via model.train() after generation.
-            adv_images = fgsm(images, labels)
+            # Split the batch: a clean_batch_frac slice stays unperturbed to
+            # anchor the decision boundary to the real data distribution;
+            # the rest is adversarially perturbed.
+            batch_n = images.size(0)
+            n_clean = int(round(batch_n * clean_batch_frac))
+
+            if n_clean > 0:
+                clean_slice = images[:n_clean]
+            if n_clean < batch_n:
+                adv_slice_in = images[n_clean:]
+                adv_labels = labels[n_clean:]
+
+                if random_start:
+                    # FGSM-RS (Wong et al. 2020): start from a random point
+                    # inside the eps-ball (pixel space) before the FGSM step,
+                    # instead of starting from the clean image. Prevents the
+                    # model from exploiting local linearity around clean
+                    # inputs — the documented mechanism behind catastrophic
+                    # overfitting in pure single-step FGSM AT.
+                    adv_px = (adv_slice_in * std_t + mean_t).clamp(0.0, 1.0)
+                    delta = torch.empty_like(adv_px).uniform_(-at_eps, at_eps)
+                    rs_px = (adv_px + delta).clamp(0.0, 1.0)
+                    adv_slice_in = (rs_px - mean_t) / std_t
+
+                # torchattacks temporarily sets model.eval() internally, then
+                # restores training mode via model.train() after generation.
+                adv_slice = fgsm(adv_slice_in, adv_labels)
+
+            if n_clean > 0 and n_clean < batch_n:
+                adv_images = torch.cat([clean_slice, adv_slice], dim=0)
+            elif n_clean > 0:
+                adv_images = clean_slice
+            else:
+                adv_images = adv_slice
 
             optimizer.zero_grad()
             logits = model(adv_images)
