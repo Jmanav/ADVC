@@ -47,7 +47,7 @@ from torchvision.datasets import ImageFolder
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from models.loader import load_config, load_model, resolve_data_path, dataset_scoped_dir
+from models.loader import load_config, load_model, resolve_data_path, dataset_scoped_dir, dataset_results_path
 from utils.datasets import build_eval_transform, build_remapped_folder
 import attacks.fgsm as fgsm_mod
 import attacks.pgd  as pgd_mod
@@ -170,11 +170,10 @@ def _build_attack(name, model, cfg):
 
 def _load_all_results(cfg: dict) -> list[dict]:
     """Load phase1, phase2_at, phase2_atkd CSVs into one list of dicts."""
-    results_dir = _ROOT / cfg["paths"]["results_dir"]
     files = {
-        "none":  results_dir / "phase1_results.csv",
-        "at":    results_dir / "phase2_at_results.csv",
-        "at_kd": results_dir / "phase2_atkd_results.csv",
+        "none":  _ROOT / dataset_results_path("results/phase1_results.csv", cfg),
+        "at":    _ROOT / dataset_results_path("results/phase2_at_results.csv", cfg),
+        "at_kd": _ROOT / dataset_results_path("results/phase2_atkd_results.csv", cfg),
     }
     rows = []
     for defense, path in files.items():
@@ -566,7 +565,7 @@ def fig4_compression_vs_defense(
     if attack_filter:
         attacks_in_data = [a for a in attacks_in_data if a == attack_filter]
 
-    compressions = ["int8", "int4"]
+    compressions = ["fp32", "int8", "int4"]
     defenses     = ["none", "at", "at_kd"]
     def_labels   = [DEFENSE_LABELS.get(d, d) for d in defenses]
 
@@ -787,7 +786,7 @@ def table1_quantitative(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate all paper figures.")
     parser.add_argument("--model",       default="deit_small", choices=["deit_small"])
-    parser.add_argument("--compression", choices=["int8", "int4"], default=None)
+    parser.add_argument("--compression", choices=["fp32", "int8", "int4"], default=None)
     parser.add_argument("--attack",      choices=["fgsm", "pgd", "patch"], default=None)
     parser.add_argument("--fig",         choices=["1", "2", "3", "4", "table"], default=None,
                         help="Generate only this figure (default: all).")
