@@ -13,6 +13,11 @@ results/*/phase*_results.csv
 results/tiny-imagenet/
 !results/**/.gitkeep
 
+# Local Kaggle-dataset staging folders (manual download/upload workspace for
+# advc-results — never meant to be committed, only uploaded to Kaggle directly).
+results_advc/
+results_advc_*/
+
 # Datasets / large files
 *.zip
 *.tgz
