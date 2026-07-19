@@ -1,0 +1,10 @@
+timestamp,dataset,model,compression,defense,attack,clean_acc,robust_acc,asr,robustness_gap,phase
+2026-07-15T20:11:54Z,tiny-imagenet,deit_small,fp32,at_kd,fgsm,0.8555,0.1697,0.8303,0.6858,2
+2026-07-15T20:36:03Z,tiny-imagenet,deit_small,fp32,at_kd,pgd,0.8555,0.0,1.0,0.8555,2
+2026-07-15T20:45:56Z,tiny-imagenet,deit_small,fp32,at_kd,patch,0.8555,0.13,0.87,0.75,2
+2026-07-15T22:55:26Z,tiny-imagenet,deit_small,int8,at_kd,fgsm,0.8543,0.0282,0.9718,0.8261,2
+2026-07-15T23:17:18Z,tiny-imagenet,deit_small,int8,at_kd,pgd,0.8543,0.0,1.0,0.8543,2
+2026-07-15T23:25:26Z,tiny-imagenet,deit_small,int8,at_kd,patch,0.8543,0.06,0.94,0.806,2
+2026-07-16T01:12:50Z,tiny-imagenet,deit_small,int4,at_kd,fgsm,0.852,0.1314,0.8686,0.7206,2
+2026-07-16T01:27:20Z,tiny-imagenet,deit_small,int4,at_kd,pgd,0.852,0.0054,0.9946,0.8466,2
+2026-07-16T01:32:44Z,tiny-imagenet,deit_small,int4,at_kd,patch,0.852,0.156,0.844,0.704,2

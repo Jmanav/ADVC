@@ -4,13 +4,10 @@ __pycache__/
 *.egg-info/
 .ipynb_checkpoints/
 
-# Results artifacts — per CLAUDE.md, do not commit weights/checkpoints/CSVs.
-# NOTE: the imagenette figures/CSVs under results/imagenette/ are already tracked
-# and kept intentionally; these rules stop NEW artifacts (checkpoints, phase CSVs,
-# and the tiny-imagenet subtree generated on Kaggle) from being committed.
+# Results artifacts — per CLAUDE.md, do not commit weights/checkpoints.
+# NOTE: results/imagenette/ and results/tiny-imagenet/ CSVs + figures are tracked
+# intentionally (paper results); only checkpoints are excluded.
 results/checkpoints/
-results/*/phase*_results.csv
-results/tiny-imagenet/
 !results/**/.gitkeep
 
 # Local Kaggle-dataset staging folders (manual download/upload workspace for
