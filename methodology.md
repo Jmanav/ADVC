@@ -8,14 +8,13 @@ Every experimental condition is constructed by applying the same three operation
 
 1. **Compress the model.** The pretrained FP32 DeiT-Small backbone is quantized via post-training quantization to the target precision (INT8 or INT4; Section 3.3). The compressed model *is* the edge-deployed artifact, and all subsequent operations act on it.
 2. **Defend the model.** A defense is applied to the *already-compressed* model by adversarially fine-tuning its trainable parameters — either Adversarial Training (AT; Section 4) or Adversarial Training with Knowledge Distillation (AT+KD; Section 4) — while the quantized weights stay frozen. The undefended baseline omits this operation.
-3. **Attack the model.** The resulting (compressed, optionally defended) model is attacked white-box under the L∞ threat model (FGSM, PGD, Patch, or the combined attack; Section 5), and its clean and robust accuracy are measured (Section 6).
+3. **Attack the model.** The resulting (compressed, optionally defended) model is attacked white-box under the L∞ threat model (FGSM, PGD, or Patch; Section 5), and its clean and robust accuracy are measured (Section 6).
 
 These operations are organised into evaluation phases:
 
 1. **Phase 1** — Baseline evaluation of an undefended model across all three precision levels (FP32, INT8, INT4) and three attack types.
 2. **Phase 2a** — Adversarial Training (AT) applied to each compressed model, followed by re-evaluation under all attacks.
 3. **Phase 2b** — Adversarial Training with Knowledge Distillation (AT+KD) applied to each compressed model, followed by re-evaluation under all attacks.
-4. **Phase 3** — The combined attack — *sequential perturbation composition* of FGSM → PGD → Patch (Section 5.4) — applied against the undefended, AT, and AT+KD models at each compression level.
 
 The pipeline strictly enforces the order **compress first, then defend, then attack**. Compressing before defending reflects the realistic edge deployment scenario in which a model is quantized for resource constraints *before* any robustness fine-tuning is applied, so that the defended artifact is itself the compressed model that will be deployed.
 
@@ -116,7 +115,14 @@ DeiT-Small is selected as the primary model for the following reasons:
 
 Both defenses fine-tune the already-compressed model. Training configuration is shared across AT and AT+KD except where noted.
 
-**Adversarial example generation during training.** Both defenses use **single-step FGSM** to generate the adversarial inputs on which the model is trained (i.e. *FGSM-AT*), at the training budget $\varepsilon_{\text{train}} = 8/255$ matching the evaluation budget. This is **not** PGD-AT (Madry et al., 2018) or TRADES (Zhang et al., 2019). FGSM-AT is chosen because the experiments run under a constrained Kaggle dual-T4 compute budget, and multi-step inner maximisation across three compression levels and seven epochs would exceed it. We note that single-step FGSM-AT is known to be weaker than PGD-AT and susceptible to *catastrophic overfitting*, where robustness to multi-step attacks collapses abruptly during training (Andriushchenko & Flammarion, 2020); the layer-freezing and small per-compression learning rates (Sections 4.2–4.3) mitigate, but do not eliminate, this risk, and it is a stated limitation of the defense configuration.
+**Adversarial example generation during training.** Both defenses generate their training adversarials with a **single-step FGSM attack that uses a random start (FGSM-RS) and 50% clean/adversarial batch mixing**, at the training budget $\varepsilon_{\text{train}} = 8/255$ matching the evaluation budget. A single gradient step (rather than multi-step PGD-AT (Madry et al., 2018) or TRADES (Zhang et al., 2019)) is chosen because the experiments run under a constrained Kaggle dual-T4 compute budget, and multi-step inner maximisation across three compression levels and seven epochs would exceed it.
+
+Plain single-step FGSM-AT — taking the FGSM step directly from the clean input, with every training example perturbed — is a documented failure mode: it lets the model exploit local linearity around the clean point to trivially "solve" the single-step attack without learning robust features, causing *catastrophic overfitting*, in which robustness to multi-step attacks collapses abruptly during training (Wong et al., 2020; Andriushchenko & Flammarion, 2020). We reproduced exactly this collapse on the fine-tuned Tiny-ImageNet head under naive FGSM-AT. We therefore combine two complementary mitigations from the fast-adversarial-training literature:
+
+- **Random start (FGSM-RS)** (`random_start = true`): before taking the FGSM gradient step, the input is perturbed to a uniformly random point inside the $L_\infty$ $\varepsilon$-ball in pixel space, rather than starting from the clean image. This is the specific fix Wong et al. (2020) identify for catastrophic overfitting in single-step AT — it repairs the *quality* of the adversarial example.
+- **Clean/adversarial batch mixing** (`clean_batch_frac = 0.5`): half of every training batch is left unperturbed. This protects clean accuracy by anchoring the decision boundary to the real data distribution, addressing a failure mode distinct from what random start fixes; the two are complementary, not redundant.
+
+This recipe is a deliberate, documented deviation from vanilla single-step FGSM-AT — it should be cited as "FGSM-RS with 50% clean/adversarial batch mixing," not plain "FGSM adversarial training." It mitigates but does not fully eliminate the weakness of single-step training relative to PGD-AT; the residual gap remains a stated limitation of the defense configuration, and is visible in the results as near-zero robustness under the multi-step PGD evaluation attack.
 
 | Hyperparameter | Value |
 |---------------|-------|
@@ -125,20 +131,20 @@ Both defenses fine-tune the already-compressed model. Training configuration is 
 | Epochs | 7 |
 | Batch size | 16 |
 | Warmup epochs | 1 (epoch 1 uses lr/10) |
-| Training adversary | FGSM, single-step |
+| Training adversary | FGSM-RS, single-step (random start; 50% clean/adversarial batch mixing) |
 | AT epsilon ($\varepsilon_{\text{train}}$) | 8/255 ≈ 0.03137 |
 | Checkpoint frequency | Every epoch |
 | Loss function | Cross-entropy (AT); weighted CE + KL divergence (AT+KD), see below |
 
-**AT loss (Phase 2a).** Standard cross-entropy on the FGSM-perturbed inputs:
+**AT loss (Phase 2a).** Standard cross-entropy on the training inputs $\mathbf{x}_{\text{adv}}$, where $\mathbf{x}_{\text{adv}}$ denotes the mixed batch — half clean, half FGSM-RS-perturbed — described above:
 
-$$\mathcal{L}_{\text{AT}} = \mathcal{L}_{\text{CE}}\!\big(f_\theta(\mathbf{x}_{\text{adv}}),\, y\big), \qquad \mathbf{x}_{\text{adv}} = \text{FGSM}(f_\theta, \mathbf{x}, y;\, \varepsilon_{\text{train}}).$$
+$$\mathcal{L}_{\text{AT}} = \mathcal{L}_{\text{CE}}\!\big(f_\theta(\mathbf{x}_{\text{adv}}),\, y\big), \qquad \mathbf{x}_{\text{adv}} = \text{FGSM\text{-}RS}(f_\theta, \mathbf{x}, y;\, \varepsilon_{\text{train}})\ \text{on 50\% of the batch}.$$
 
 **AT+KD loss (Phase 2b).** Cross-entropy on hard labels plus a temperature-scaled KL-divergence distillation term from a frozen FP32 teacher:
 
 $$\mathcal{L}_{\text{AT+KD}} = \alpha \cdot \mathcal{L}_{\text{CE}}\!\big(f_S(\mathbf{x}_{\text{adv}}),\, y\big) + (1-\alpha)\cdot \tau^2 \cdot \text{KL}\!\Big(\sigma\big(\tfrac{\mathbf{z}_S}{\tau}\big)\,\big\|\,\sigma\big(\tfrac{\mathbf{z}_T}{\tau}\big)\Big),$$
 
-where $\mathbf{z}_S, \mathbf{z}_T$ are the student and teacher logits, $\sigma$ is the softmax, the temperature is $\tau = 4.0$, and the cross-entropy weight is $\alpha = 0.5$ (so the KD weight is $1-\alpha = 0.5$). The $\tau^2$ factor restores the gradient magnitude attenuated by temperature scaling (Hinton et al., 2015). **The teacher is queried on the same FGSM adversarial inputs $\mathbf{x}_{\text{adv}}$ as the student — not on clean inputs** — so the soft targets describe the teacher's behaviour under attack. The teacher is the frozen, full-precision (FP32) pretrained DeiT-Small (it is *not* itself adversarially trained); it is held in `eval()` mode with every forward pass wrapped in `torch.no_grad()`, and is never updated.
+where $\mathbf{z}_S, \mathbf{z}_T$ are the student and teacher logits, $\sigma$ is the softmax, the temperature is $\tau = 4.0$, and the cross-entropy weight is $\alpha = 0.5$ (so the KD weight is $1-\alpha = 0.5$). The $\tau^2$ factor restores the gradient magnitude attenuated by temperature scaling (Hinton et al., 2015). **The teacher is queried on the same inputs $\mathbf{x}_{\text{adv}}$ as the student** — the identical mixed clean/FGSM-RS batch — so the CE and KL terms stay consistent with each other and the soft targets describe the teacher's behaviour on the examples the student is trained on. The teacher is the frozen, full-precision (FP32) pretrained DeiT-Small (it is *not* itself adversarially trained); it is held in `eval()` mode with every forward pass wrapped in `torch.no_grad()`, and is never updated.
 
 ### 4.2 Per-Compression Learning Rates
 
@@ -230,21 +236,6 @@ where $\mathbf{p}$ is the patch, $\eta$ is the patch learning rate, and $\mathbf
 
 The patch is evaluated on a 500-image subset of the validation set rather than the full 3,925-image subset, as 150 optimisation steps per batch makes the patch attack approximately 7.5× more expensive than FGSM or PGD per image.
 
-### 5.4 Combined Attack (Phase 3)
-
-The Phase 3 combined attack is a **sequential perturbation composition** of the three preceding attacks, applied in the fixed order FGSM → PGD → Patch:
-
-$$\mathbf{x}_{\text{adv}} = \text{Patch}\Big(\text{PGD}\big(\text{FGSM}(\mathbf{x},\, y),\, y\big),\, y\Big).$$
-
-The adversarial *output* of each stage becomes the *input* to the next, and the same ground-truth labels $y$ are used at every stage. It is **not** a survivor-filtering cascade (FGSM, then re-attack only the still-correct images with PGD, etc.) and **not** an ensemble that selects the strongest single perturbation or sums per-attack losses — every image passes through all three stages in sequence, accumulating an FGSM step, then 20 PGD steps, then a 150-step optimised patch. Because each stage operates in ImageNet-normalised space and internally un-normalises/re-normalises (Section 5), the composition is well-defined end-to-end. The combined attack is the strongest perturbation considered and, like the patch attack, is evaluated on the 500-image subset.
-
-| Parameter | Value |
-|-----------|-------|
-| Composition | Sequential: FGSM → PGD → Patch |
-| Per-stage parameters | As in Sections 5.1–5.3 (ε = 8/255; PGD 20 steps, α = 2/255; patch 32×32, 150 steps) |
-| Labels | Ground-truth $y$, shared across all stages |
-| Evaluation subset | 500 images (prefix of the validation subset) |
-
 ---
 
 ## 6. Evaluation Metrics
@@ -292,7 +283,7 @@ torch.cuda.manual_seed_all(42)
 
 ### 7.4 Statistical Reporting
 
-Each (compression, defense, attack) cell is evaluated once on the fixed 3,925-image (or 500-image for patch and combined) validation subset. No repeated trials are performed. Variance across seeds is not reported; the deterministic subset selection ensures that all reported numbers are reproducible exactly given the same model weights and environment.
+Each (compression, defense, attack) cell is evaluated once on the fixed 3,925-image (or 500-image for the patch attack) validation subset. No repeated trials are performed. Variance across seeds is not reported; the deterministic subset selection ensures that all reported numbers are reproducible exactly given the same model weights and environment.
 
 ---
 
@@ -356,4 +347,5 @@ The repository includes:
 - Hinton, G., Vinyals, O., & Dean, J. (2015). *Distilling the knowledge in a neural network*. arXiv:1503.02531.
 - Madry, A., Makelov, A., Schmidt, L., Tsipras, D., & Vladu, A. (2018). *Towards deep learning models resistant to adversarial attacks*. ICLR 2018.
 - Touvron, H., Cord, M., Douze, M., Massa, F., Sablayrolles, A., & Jégou, H. (2021). *Training data-efficient image transformers & distillation through attention*. ICML 2021.
+- Wong, E., Rice, L., & Kolter, J. Z. (2020). *Fast is better than free: Revisiting adversarial training*. ICLR 2020. arXiv:2001.03994.
 - Zhang, H., Yu, Y., Jiao, J., Xing, E. P., El Ghaoui, L., & Jordan, M. I. (2019). *Theoretically principled trade-off between robustness and accuracy (TRADES)*. ICML 2019.

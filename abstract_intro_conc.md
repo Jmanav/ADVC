@@ -1,8 +1,7 @@
 # Adversarial Robustness Under Compression for Edge Vision Transformers
 
-> **Draft — Abstract and Introduction.** All quantitative claims are drawn verbatim
-> from `results/imagenette/*.csv` and `results/tiny-imagenet/*.csv` (Phases 1, 2a, 2b).
-> Phase 3 (combined attack) is deliberately omitted here — see the assumptions list.
+> **Draft — Abstract, Introduction, and Conclusion.** All quantitative claims are drawn
+> verbatim from `results/imagenette/*.csv` and `results/tiny-imagenet/*.csv` (Phases 1, 2a, 2b).
 
 ---
 
@@ -109,8 +108,51 @@ The remainder of the paper is organized as follows. Section 2 details the method
 compress-then-defend-then-attack pipeline, the DeiT-Small backbone and weight-only PTQ
 scheme, the two defenses and their training recipe, and the attack configurations. Section 3
 presents results phase by phase—undefended baselines, AT, and AT+KD—across both datasets.
-Section 4 discusses the negative results and their implications for edge deployment, and
-Section 5 concludes with limitations and future work.
+Section 4 concludes, interpreting the negative results and their implications for edge
+deployment alongside the study's limitations and future work.
+
+---
+
+## 4. Conclusion
+
+We asked whether adversarial defenses applied to an already-compressed Vision Transformer
+retain their value, and whether that value degrades as quantization sharpens. The answer our
+experiments give is narrow and mostly negative: single-step adversarial training—with or
+without knowledge distillation—recovers clean accuracy and blunts weak and patch attacks at
+full precision, but it does not deliver robustness to a strong multi-step adversary, and
+whatever advantage distillation offers does not survive compression.
+
+The negative results are the substance, not a caveat. Robustness to 20-step PGD stays at or
+near zero in every configuration we measured—`robust_acc = 0.0` across all defended
+Imagenette cells, and never above 0.0079 anywhere on Tiny-ImageNet—so the single-step FGSM
+training signal simply does not transfer to the stronger attack the defense was meant to
+resist. The distillation term is likewise no reliable help: on Imagenette FGSM, AT+KD and AT
+are effectively tied under quantization (INT4: 0.361 vs. 0.363; INT8: 0.425 vs. 0.426), and
+on Tiny-ImageNet the two swap places depending on the attack—AT leads on FGSM at full
+precision (0.274 vs. 0.170) while AT+KD leads on the patch attack (0.130 vs. 0.058). Where
+the defenses do earn their keep is exactly where the attack is weakest: Imagenette patch
+robustness climbs from 0.192 undefended to 0.688 (AT) and 0.748 (AT+KD) at FP32, alongside a
+clean-accuracy recovery into the high 0.90s. A full-precision teacher, in short, does not
+reliably rescue a compressed student against the attacks that matter most.
+
+These conclusions are bounded by the study's scope. Compression here is *weight-only,
+data-free* PTQ, which reduces the memory footprint but is not integer-only inference, so our
+numbers should not be read as robustness under fully-integer edge kernels. The evidence rests
+on a single backbone, DeiT-Small, and two datasets whose classification heads differ by
+construction (a frozen 1000-way ImageNet head for Imagenette, a fine-tuned 200-way head for
+Tiny-ImageNet), leaving architecture and task breadth open. The training adversary is
+single-step FGSM throughout—chosen under a fixed dual-T4 budget—so we do not separate "the
+defense is weak" from "single-step training is weak," and the evaluation attacks are limited
+to FGSM, PGD, and the adversarial patch.
+
+The future work that matters follows directly from those bounds. First, substitute a
+multi-step inner maximiser (PGD-AT or TRADES) for single-step FGSM training and re-run the
+matrix, which would disentangle defense strength from training-attack strength and test
+whether PGD robustness is recoverable at all under compression. Second, extend beyond
+DeiT-Small to at least one larger ViT and one convolutional baseline, and toward genuinely
+integer-only quantization, to establish whether the near-zero PGD result and the vanishing
+distillation benefit are properties of this model and this weight-only regime or of
+compressed edge models generally.
 
 ---
 
@@ -125,13 +167,7 @@ Please confirm or correct the following before submission:
    overfitting only as a limitation. **The methodology section needs updating to match the
    code** — the abstract/intro here assume the code is the ground truth. Confirm.
 
-2. **Phase 3 (combined attack) omitted.** Per your decision, no combined-attack numbers
-   appear in the abstract or intro. Note that Phase 3 is also incomplete on disk
-   (Imagenette 5/9 rows; Tiny-ImageNet absent), and every recorded combined `robust_acc` is
-   0.0. If you later complete it, the intro's "roadmap" paragraph already reserves a slot
-   for it in the results section.
-
-3. **Numbers cited in the draft — all verbatim from the CSVs.** For your quick cross-check:
+2. **Numbers cited in the draft — all verbatim from the CSVs.** For your quick cross-check:
    - Imagenette patch, FP32: undefended `robust_acc` **0.192** (`phase1_results.csv`), AT
      **0.688**, AT+KD **0.748** (`phase2_at`/`phase2_atkd_results.csv`). ✔ used in both
      abstract and intro.
@@ -143,16 +179,35 @@ Please confirm or correct the following before submission:
      INT8 AT **0.024**. ✔ (These support the "recovery vanishes under quantization" claim
      but are not individually quoted in the prose — say if you'd like them added.)
 
-4. **"Weight-only, data-free PTQ" scope.** I kept the edge/compression claims scoped to
+3. **"Weight-only, data-free PTQ" scope.** I kept the edge/compression claims scoped to
    memory-footprint reduction (not integer-only inference), matching `methodology.md` §3.3.
    If you intend a stronger deployment claim, flag it.
 
-5. **No reference paper was attached.** I matched a generic ML-security-venue register
+4. **No reference paper was attached.** I matched a generic ML-security-venue register
    (terse, claim-forward, honest). If you have a specific target venue/paper whose tone you
    want mirrored, share it and I'll re-tune.
 
-6. **A framing choice to confirm.** The intro presents the two *negative* results (no PGD
-   robustness; KD advantage doesn't survive quantization) as the paper's headline
-   contribution. This is the honest reading of your data, but it reframes the project away
-   from the "AT+KD wins" hypothesis in `CLAUDE.md`'s expected-findings. Confirm you're
-   comfortable leading with the negative result.
+5. **A framing choice to confirm.** The abstract, intro, and conclusion present the two
+   *negative* results (no PGD robustness; KD advantage doesn't survive quantization) as the
+   paper's headline contribution. This is the honest reading of your data, but it reframes
+   the project away from the "AT+KD wins" hypothesis in `CLAUDE.md`'s expected-findings.
+   Confirm you're comfortable leading with the negative result.
+
+6. **Section structure.** Phase 3 (combined attack) is now removed entirely from this draft,
+   and there is no separate Discussion section: the negative-result interpretation lives in
+   the Conclusion (§4), and the roadmap and section numbering (§1 Intro → §2 Methodology →
+   §3 Results → §4 Conclusion) reflect this. `methodology.md` still describes the Phase 3
+   combined attack (§5.4) — if this paper is to drop Phase 3 completely, that section of
+   `methodology.md` should be cut too. Confirm.
+
+7. **New numbers introduced in the Conclusion — all verbatim from the CSVs, none new to the
+   paper's claim set.** For cross-check:
+   - Imagenette FGSM: AT+KD vs AT — INT4 **0.361019** vs **0.362803**; INT8 **0.425478** vs
+     **0.426497** (`phase2_atkd`/`phase2_at_results.csv`). Rounded to 3 dp in prose. ✔
+   - Tiny-ImageNet FGSM FP32: AT **0.2738** vs AT+KD **0.1697**; patch FP32: AT+KD **0.130**
+     vs AT **0.058** (`tiny-imagenet/phase2_*`). ✔ These illustrate the "AT and AT+KD swap
+     places by attack" point; they extend the intro's claim with specifics but introduce no
+     *new* claim.
+   - "never above 0.0079" for Tiny-ImageNet PGD = the undefended INT4 cell (0.0079); all
+     defended Tiny-ImageNet PGD cells are ≤0.0054. ✔ Imagenette defended PGD = 0.0
+     everywhere. ✔
