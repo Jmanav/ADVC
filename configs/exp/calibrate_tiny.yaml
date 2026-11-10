@@ -3,7 +3,11 @@
 # Reports forward-only images/s and forward+backward-to-input image-passes/s (the §5.0 unit), per
 # precision x TF32, GPU-only on a fixed in-memory batch; the loader rate separately; then an fp32
 # PGD-20 TF32 off-vs-on agreement check on 200 stratified images.
-# Estimated runtime: 3-5 min on a T4 (estimate).
+# Estimated runtime: ~2-4 min on a T4 (estimate; the W1 smoke measured ~1.9 s per
+# fp32 fwd+bwd batch of 32 on a T4, single batch incl. warm-up).
+# TF32 is OFF here: T4 (sm_75) has no TF32 hardware, so on/off would time the same
+# fp32 kernels twice. The TF32 check belongs in the H100 calibration.
+# batch_sizes includes 16 = the AT/AT+KD training batch (CLAUDE.md).
 name: calibrate_tiny
 type: calibrate
 dataset: tiny-imagenet
@@ -18,14 +22,14 @@ data:
 calibrate:
   per_class: 1                # images for the fixed timing batch (first max(batch_sizes))
   subset_seed: 0
-  batch_sizes: [32]
+  batch_sizes: [16, 32]
   warmup_batches: 3
   timed_batches: 10
-  tf32_modes: [false, true]   # fp32 only
+  tf32_modes: [false]         # T4: no TF32 hardware (see header)
   tf32_modes_quantized: [false]   # int8/int4 (bnb compute in fp16; TF32 not expected to matter)
   loader_batches: 10          # 0 disables the data-loader throughput probe
   tf32_validation:
-    enabled: true
+    enabled: false            # T4: nothing to validate; run on the H100 slice instead
     per_class: 1              # 200 classes x 1 = 200 images
     subset_seed: 0
     attacks: [clean, pgd20]

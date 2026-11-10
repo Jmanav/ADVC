@@ -3,7 +3,9 @@
 # 1,000 stratified val images (5/class, seed 0), clean / FGSM / PGD-20, fp32 / int8 / int4, compared
 # with the July rows of results/tiny-imagenet/phase1_results.csv by a two-proportion 95 % check.
 # Resumable: finished (precision, attack) results for the same subset are reused unless --force.
-# Estimated runtime: 8-12 min on a T4 (estimate: 1,000 x 22 passes per precision at the §5.0 T4 rates).
+# Estimated runtime: ~60-70 min on a T4. Extrapolated from the W1 smoke (fp32 PGD-20 on 32 images took
+# 39.6 s, i.e. ~17 image-passes/s): 1,000 x ~22 passes per precision x 3 precisions. The earlier
+# "8-12 min" figure used the §5.0 planning rate and was ~6x too low. Re-derive from calibrate_tiny.
 name: repro_check_tiny
 type: repro_check
 dataset: tiny-imagenet

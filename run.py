@@ -260,7 +260,15 @@ def load_eval_model(exp: dict, cfg: dict, precision: str, ckpt: dict) -> tuple[t
             info["bias_guard_installed"] = True
         return loaded.eval(), info
     sd = torch.load(str(path), map_location="cuda")
-    res = model.load_state_dict(sd, strict=bool(ckpt.get("strict", True)))
+    strict = bool(ckpt.get("strict", True))
+    if precision == "int8":
+        # bnb 0.50.2 only accepts an INT8 state_dict before the first forward
+        # (A-13, confirmed on Kaggle 2026-11-10), so rebuild with it applied.
+        del model
+        model = load_model(exp["model"], precision, cfg, device="cuda", int8_state_dict=sd, int8_strict=strict)
+        info.update(model.__dict__.pop("_advc_int8_load", {}))
+        return model.eval(), info
+    res = model.load_state_dict(sd, strict=strict)
     info.update(missing=list(res.missing_keys), unexpected=list(res.unexpected_keys))
     return model.eval(), info
 

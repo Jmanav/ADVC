@@ -109,6 +109,14 @@ tiny-imagenet dirs at `/kaggle/working/tiny_if/...`. Never symlink the read-only
   `torch.load`s a full INT4 pickle must call `install_fp32_bias_guard()` itself
   (`run.py` does). Also: bnb 0.50.2 INT8 casts fp32 activations to fp16 inside
   `MatMul8bitLt` — state this in the paper (REVISION_PLAN Q5).
+- **INT8 state_dicts must load BEFORE the first forward** on bnb 0.50.2 (after it,
+  `load_state_dict` raises "Loading a quantized checkpoint into non-quantized
+  Linear8bitLt is not supported" — confirmed on Kaggle 2026-11-10, RESULTS_LOG R-001).
+  Use `load_model(..., int8_state_dict=sd)`; `run.py` does. The legacy phase
+  scripts' `--skip-training` INT8 path still loads after, and will fail.
+- **Open (W1b):** bnb 0.50.2 INT8 head (200 outputs) raises `cublasLt ran into
+  an error` at batch 32 on a T4 (works at batch 1). Do not run INT8 TinyImageNet
+  jobs until W1b P1/P2 settle the fix (RESULTS_LOG R-001).
 - **INT4 full-model pickles need `torch.load(..., weights_only=False)`** —
   torch ≥2.6 defaults to `weights_only=True` and cannot unpickle nn.Modules.
 - **Tensor cache** (`utils/tensor_cache.py`, `scripts/build_tensor_cache.py`).

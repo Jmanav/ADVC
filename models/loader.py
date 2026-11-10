@@ -109,6 +109,8 @@ def load_model(
     compression: CompressionLevel,
     config: dict,
     device: str = "cuda",
+    int8_state_dict: dict | None = None,
+    int8_strict: bool = True,
 ) -> torch.nn.Module:
     """
     Load a DeiT model at the specified compression level.
@@ -118,6 +120,13 @@ def load_model(
         compression: "fp32", "int8", or "int4"
         config:      Parsed base.yaml config dict
         device:      "cuda" or "cpu"
+        int8_state_dict: int8 only — a saved Linear8bitLt state_dict (e.g. a
+            defended checkpoint) to load BEFORE the first forward. bnb 0.50.2
+            refuses it afterwards ("Loading a quantized checkpoint into
+            non-quantized Linear8bitLt is not supported"; confirmed on Kaggle
+            2026-11-10, REVISION_PLAN A-13). The load result is left on
+            `model._advc_int8_load` as {"missing": [...], "unexpected": [...]}.
+        int8_strict: strict flag for that load_state_dict.
 
     Returns:
         model: torch.nn.Module in eval mode, moved to device.
@@ -140,7 +149,8 @@ def load_model(
             print(f"[loader] FP32: applied fine-tuned base "
                   f"(missing={len(missing)}, unexpected={len(unexpected)})")
     elif compression == "int8":
-        model = _load_int8(timm_name, device, num_classes, finetuned_state)
+        model = _load_int8(timm_name, device, num_classes, finetuned_state,
+                           int8_state_dict=int8_state_dict, int8_strict=int8_strict)
         _print_bias_guard_report("INT8", install_fp32_bias_guard(model))
     elif compression == "int4":
         model = _load_int4(timm_name, config, device, num_classes, finetuned_state)
@@ -211,6 +221,8 @@ def _load_int8(
     device: str,
     num_classes: int = 1000,
     finetuned_state: dict | None = None,
+    int8_state_dict: dict | None = None,
+    int8_strict: bool = True,
 ) -> torch.nn.Module:
     """
     Load INT8 quantized model via bitsandbytes Linear8bitLt.
@@ -240,6 +252,16 @@ def _load_int8(
 
     replace_linear_int8(model)
     model = model.to(device)
+
+    # A saved INT8 state_dict must be loaded after .to(cuda) (weights quantised,
+    # weight.SCB set) but BEFORE the first forward, which moves SCB into
+    # layer.state and sets weight.SCB=None (bnb 0.50.2 nn/modules.py:1142-1163).
+    if int8_state_dict is not None:
+        res = model.load_state_dict(int8_state_dict, strict=int8_strict)
+        model._advc_int8_load = {"missing": list(res.missing_keys),
+                                 "unexpected": list(res.unexpected_keys)}
+        print(f"[loader] INT8: loaded saved int8 state_dict before first forward "
+              f"(missing={len(res.missing_keys)}, unexpected={len(res.unexpected_keys)})")
 
     # Trigger .CB buffer population for all Linear8bitLt layers.
     with torch.no_grad():

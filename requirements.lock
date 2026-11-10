@@ -1,50 +1,42 @@
 # requirements.lock — exact pins for the libraries the code imports (REVISION_PLAN C-01).
 #
-# STATUS: PARTIAL / PROVISIONAL.
-#  - The torch pin is provisional until the H100-slice env report
-#    (python scripts/env_report.py --json env_report.json) is in; the H100 build
-#    may need a different CUDA variant than the Kaggle one recorded here.
-#  - autoattack will be pinned to a git commit hash in W2 (C-08) — pending.
-#  - Lines marked "# PENDING env report: <package>" have no verifiable version in
-#    the repo, REVISION_PLAN.md or the unpacked wheels; fill them from the env
-#    report. Do NOT guess.
-#  - bitsandbytes is pinned to 0.50.2 per REVISION_PLAN §9 Q12 ("pin bitsandbytes
-#    0.50.2 plus an fp32-bias guard", confirmed after the W1 smoke tests). The
-#    fp32-bias guard lives in models/loader.py (install_fp32_bias_guard).
+# SOURCE: Kaggle T4 env report, 2026-11-10T11:18Z, git 89018eb (scripts/env_report.py,
+#   notebooks/w1_checks_kaggle.ipynb). Python 3.13.16, CUDA 13.0, cuDNN 92700,
+#   driver 580.178.04, 2x Tesla T4 (sm_75).
+#
+# STATUS: Kaggle side CONFIRMED. Still pending:
+#  - the H100-slice env report (its torch/CUDA build may differ; record it separately);
+#  - autoattack, pinned to a git commit in W2 (C-08);
+#  - tqdm, matplotlib, pytest: not printed by env_report — fill from `pip show` next run.
+#  - bitsandbytes 0.50.2 per REVISION_PLAN §9 Q12 (+ fp32-bias guard in models/loader.py).
+#    Kaggle installs it with --no-deps so Kaggle's torch build is never replaced.
 #  - requirements.txt (loose ranges) is unchanged and still the human-facing list.
 #
 # Install (Kaggle-style; adjust the index URL to the CUDA build actually used):
 #   pip install -r requirements.lock --extra-index-url https://download.pytorch.org/whl/cu130
 
 # ── Core ─────────────────────────────────────────────────────────────────────
-# Kaggle T4, 2026-11-09 (REVISION_PLAN.md A-13, line 413: "torch 2.11.0+cu130").
 torch==2.11.0+cu130
-# PENDING env report: torchvision
+torchvision==0.26.0+cu130
 
 # ── Model / quantization ─────────────────────────────────────────────────────
-# Kaggle 2026-11-09 Q4 run (version supplied by the authors' run printout; not yet
-# recorded in the repo or plan — confirm with the env report).
 timm==1.0.30
-# Kaggle 2026-11-09 (REVISION_PLAN.md A-13 line 417 "bitsandbytes 0.50.2 also
-# reports ..."; §9 Q12 decision; source audited in bnb-0.50.2 wheel).
 bitsandbytes==0.50.2
+# transformers 5.20.2 and accelerate 1.15.0 are present on Kaggle but not imported by the code.
 
 # ── Attacks ──────────────────────────────────────────────────────────────────
-# Version actually used is not recorded: requirements.txt has torchattacks>=3.4.0
-# and REVISION_PLAN §1.4 (line 189) only states 3.4.0 and 3.5.1 share the same
-# normalization logic.
-# PENDING env report: torchattacks
+torchattacks==3.5.1
 # W2 / C-08: pin to a git commit, e.g. autoattack @ git+https://github.com/fra31/auto-attack@<commit>
-# PENDING env report: autoattack
+# PENDING: autoattack
 
 # ── Data / utils ─────────────────────────────────────────────────────────────
-# PENDING env report: numpy
-# PENDING env report: Pillow
-# PENDING env report: PyYAML
-# PENDING env report: tqdm
+numpy==2.1.3
+Pillow==13.0.0
+PyYAML==6.0.3
+# PENDING (not in env report): tqdm
 
 # ── Figures (imported by the plotting scripts) ───────────────────────────────
-# PENDING env report: matplotlib
+# PENDING (not in env report): matplotlib
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-# PENDING env report: pytest
+# PENDING (not in env report): pytest

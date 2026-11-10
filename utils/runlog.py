@@ -171,7 +171,14 @@ def wilson_interval(k: int, n: int, z: float = 1.96) -> tuple[float | None, floa
     denom = 1.0 + z2 / n
     center = (p + z2 / (2.0 * n)) / denom
     half = z * math.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n)) / denom
-    return (max(0.0, center - half), min(1.0, center + half))
+    lo, hi = max(0.0, center - half), min(1.0, center + half)
+    # The Wilson bounds are exactly 0 at k=0 and exactly 1 at k=n; float rounding
+    # gave 0.9999999999999999 for k=n=31 (W1 Kaggle test failure, 2026-11-10).
+    if k == 0:
+        lo = 0.0
+    if k == n:
+        hi = 1.0
+    return (lo, hi)
 
 
 def summarize_flags(flags: Iterable[int | bool], z: float = 1.96) -> dict:
