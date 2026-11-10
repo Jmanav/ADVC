@@ -1,0 +1,23 @@
+# W1 smoke test (C-01; INT8 attack-path risk from REVISION_PLAN A-13), Kaggle T4, TinyImageNet.
+#   python run.py --exp configs/exp/smoke_tiny.yaml
+#   python run.py --exp configs/exp/smoke_tiny.yaml --precisions int8
+# Per precision: load -> forward -> backward-to-input -> FGSM -> PGD-20 on ONE batch.
+# Each step is isolated; failures are logged with full tracebacks
+# (<out-root>/tiny-imagenet/runs/<run_id>.traceback.txt) and the next precision still runs.
+# Estimated runtime: 1-3 min (estimate).
+name: smoke_tiny
+type: smoke
+dataset: tiny-imagenet        # needs results/checkpoints/tiny-imagenet/base/deit_small_ft.pt
+model: deit_small
+seed: 0
+tf32: false
+precisions: [fp32, int8, int4]
+data:
+  eval_cache: null            # e.g. /kaggle/working/cache/tiny_val.pt (utils/tensor_cache.py)
+  num_workers: 0
+smoke:
+  batch_size: 32
+  per_class: 1                # stratified (seed below), first 32 images = classes 0..31
+  subset_seed: 0
+  linf_tol: 0.0001            # allowed pixel-space L-inf excess over eps
+cfg_overrides: {}             # deep-merged into the flattened base config, e.g. {dataset: {val_dir: ...}}

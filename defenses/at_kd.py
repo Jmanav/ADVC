@@ -44,6 +44,7 @@ sys.path.insert(0, str(_ROOT))
 
 import torchattacks
 from models.loader import load_config, resolve_data_path, dataset_scoped_dir  # noqa: F401 — re-exported for convenience
+from defenses.common import fgsm_rs
 
 
 class _LogitsWrapper(nn.Module):
@@ -349,6 +350,11 @@ def at_kd_train(
     save_every_epoch: bool = defense_cfg.get("save_every_epoch", True)
     random_start: bool     = bool(defense_cfg.get("random_start", True))
     clean_batch_frac: float = float(defense_cfg.get("clean_batch_frac", 0.0))
+    # FGSM-RS step size / projection (C-03). Defaults = Wong et al. 2020
+    # (alpha = 1.25 * eps, project onto the eps-ball). The pre-revision recipe
+    # is fgsm_rs_alpha = at_eps, fgsm_rs_project = false (appendix only).
+    fgsm_rs_alpha: float   = float(defense_cfg.get("fgsm_rs_alpha", 1.25 * at_eps))
+    fgsm_rs_project: bool  = bool(defense_cfg.get("fgsm_rs_project", True))
     mean: list             = ds_cfg["mean"]
     std: list              = ds_cfg["std"]
 
@@ -421,6 +427,8 @@ def at_kd_train(
     print(f"[AT+KD] warmup_epochs  : {warmup_epochs}  (epoch 1 uses lr={lr * 0.1:.2e})")
     print(f"[AT+KD] at_eps         : {at_eps:.5f}  ({round(at_eps * 255)}/255)")
     print(f"[AT+KD] random_start   : {random_start}  (FGSM-RS — mitigates catastrophic overfitting)")
+    if random_start:
+        print(f"[AT+KD] fgsm_rs_alpha  : {fgsm_rs_alpha:.5f}  fgsm_rs_project: {fgsm_rs_project}")
     print(f"[AT+KD] clean_batch_frac: {clean_batch_frac}  (fraction of each batch left unperturbed)")
     print(f"[AT+KD] temperature    : {temperature}")
     print(f"[AT+KD] alpha (CE)     : {alpha}   kd_weight (KL) : {kd_weight}")
@@ -431,7 +439,7 @@ def at_kd_train(
     # Raises ValueError immediately if L-inf is outside at_eps ± 10%.
     _check_fgsm_perturbation(fgsm, train_loader, at_eps, str(student_device), mean, std)
 
-    # Precompute mean/std tensors for pixel-space clamping during random-start.
+    # Precompute mean/std tensors (1,3,1,1) for the FGSM-RS path.
     mean_t = torch.tensor(mean, dtype=torch.float32, device=student_device).view(1, 3, 1, 1)
     std_t  = torch.tensor(std,  dtype=torch.float32, device=student_device).view(1, 3, 1, 1)
 
@@ -501,20 +509,24 @@ def at_kd_train(
                 adv_labels = labels[n_clean:]
 
                 if random_start:
-                    # FGSM-RS (Wong et al. 2020): start from a random point
-                    # inside the eps-ball (pixel space) before the FGSM step,
-                    # instead of starting from the clean image. Prevents the
-                    # student from exploiting local linearity around clean
-                    # inputs — the documented mechanism behind catastrophic
-                    # overfitting in pure single-step FGSM AT.
-                    adv_px = (adv_slice_in * std_t + mean_t).clamp(0.0, 1.0)
-                    delta = torch.empty_like(adv_px).uniform_(-at_eps, at_eps)
-                    rs_px = (adv_px + delta).clamp(0.0, 1.0)
-                    adv_slice_in = (rs_px - mean_t) / std_t
-
-                # torchattacks temporarily sets model.eval() internally, then
-                # restores training mode via model.train() after generation.
-                adv_slice = fgsm(adv_slice_in, adv_labels)
+                    # FGSM-RS (Wong et al. 2020): uniform start inside the
+                    # eps-ball (pixel space), FGSM step of size fgsm_rs_alpha
+                    # on the STUDENT's loss, then projection back onto
+                    # B_inf(x, eps) and [0, 1]. Prevents the student from
+                    # exploiting local linearity around clean inputs — the
+                    # documented mechanism behind catastrophic overfitting in
+                    # pure single-step FGSM AT. fgsm_rs() sets student.eval()
+                    # during generation and restores train mode afterwards.
+                    adv_slice = fgsm_rs(
+                        student, adv_slice_in, adv_labels,
+                        eps=at_eps, alpha=fgsm_rs_alpha,
+                        mean=mean_t, std=std_t, project=fgsm_rs_project,
+                    )
+                else:
+                    # Plain FGSM from the clean image (unchanged path).
+                    # torchattacks temporarily sets model.eval() internally,
+                    # then restores training mode via model.train().
+                    adv_slice = fgsm(adv_slice_in, adv_labels)
 
             if n_clean > 0 and n_clean < batch_n:
                 adv_images = torch.cat([clean_slice, adv_slice], dim=0)

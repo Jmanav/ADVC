@@ -1,0 +1,32 @@
+# Generic eval: precisions x checkpoints x attacks on a stratified subset, per-image JSON.
+#   python run.py --exp configs/exp/eval_example.yaml
+#   python run.py --exp configs/exp/eval_example.yaml --precisions int4 --set subset.per_class=all
+# Resumable: combos already present in <out-root>/<dataset>/runs/*.json with the same subset sha,
+# attack params, seed, tf32 and model are skipped (use --force to recompute).
+# Estimated runtime: n_images x 22 / R seconds per (precision, checkpoint) for clean+FGSM+PGD-20
+# (estimate; R from calibrate). Here 5,000 x 22 / 135 ~ 14 min per precision on a T4 at fp32.
+name: eval_example
+type: eval
+dataset: tiny-imagenet
+model: deit_small
+seed: 0
+tf32: false
+precisions: [fp32, int8, int4]
+attacks: [clean, fgsm, pgd20]   # also: pgd (base.yaml steps) or pgd<K>
+subset:
+  per_class: 25                 # Tier A TI subset (§5.1): 25 x 200 = 5,000; "all" = whole val set
+  seed: 0
+checkpoints:
+  - none                        # undefended (fine-tuned TI base is applied by load_model)
+  # - name: at_ep7              # example defended checkpoint; {precision} / {dataset} are substituted
+  #   path_by_precision:
+  #     fp32: results/checkpoints/{dataset}/at/at_fp32_epoch07.pt
+  #     int8: results/checkpoints/{dataset}/at/at_int8_epoch07.pt
+  #     int4: results/checkpoints/{dataset}/at/at_int4_epoch07_full_model.pt
+  #   format: auto              # auto: *_full_model.pt -> full pickle, else state_dict
+  #   strict: true
+data:
+  eval_cache: null
+  batch_size: 32
+  num_workers: null
+cfg_overrides: {}

@@ -1,0 +1,32 @@
+# Throughput calibration (REVISION_PLAN §5.0 / C-01), Kaggle T4, TinyImageNet.
+#   python run.py --exp configs/exp/calibrate_tiny.yaml
+# Reports forward-only images/s and forward+backward-to-input image-passes/s (the §5.0 unit), per
+# precision x TF32, GPU-only on a fixed in-memory batch; the loader rate separately; then an fp32
+# PGD-20 TF32 off-vs-on agreement check on 200 stratified images.
+# Estimated runtime: 3-5 min on a T4 (estimate).
+name: calibrate_tiny
+type: calibrate
+dataset: tiny-imagenet
+model: deit_small
+seed: 0
+tf32: false                   # baseline flag restored after each TF32 mode
+precisions: [fp32, int8, int4]
+data:
+  eval_cache: null
+  batch_size: 32
+  num_workers: null           # null -> base.yaml eval.num_workers (2) for ImageFolder, 0 for a cache
+calibrate:
+  per_class: 1                # images for the fixed timing batch (first max(batch_sizes))
+  subset_seed: 0
+  batch_sizes: [32]
+  warmup_batches: 3
+  timed_batches: 10
+  tf32_modes: [false, true]   # fp32 only
+  tf32_modes_quantized: [false]   # int8/int4 (bnb compute in fp16; TF32 not expected to matter)
+  loader_batches: 10          # 0 disables the data-loader throughput probe
+  tf32_validation:
+    enabled: true
+    per_class: 1              # 200 classes x 1 = 200 images
+    subset_seed: 0
+    attacks: [clean, pgd20]
+cfg_overrides: {}

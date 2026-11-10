@@ -1,0 +1,26 @@
+# TinyImageNet undefended reproduction check (REVISION_PLAN §5.5 reuse audit, "TI undefended rows").
+#   python run.py --exp configs/exp/repro_check_tiny.yaml
+# 1,000 stratified val images (5/class, seed 0), clean / FGSM / PGD-20, fp32 / int8 / int4, compared
+# with the July rows of results/tiny-imagenet/phase1_results.csv by a two-proportion 95 % check.
+# Resumable: finished (precision, attack) results for the same subset are reused unless --force.
+# Estimated runtime: 8-12 min on a T4 (estimate: 1,000 x 22 passes per precision at the §5.0 T4 rates).
+name: repro_check_tiny
+type: repro_check
+dataset: tiny-imagenet
+model: deit_small
+seed: 0                       # attack seed: torch.manual_seed(seed + batch) before every attack call
+tf32: false
+precisions: [fp32, int8, int4]
+attacks: [clean, fgsm, pgd20]
+subset:
+  per_class: 5
+  seed: 0
+data:
+  eval_cache: null
+  batch_size: 32
+  num_workers: null           # -> base.yaml eval.num_workers
+repro:
+  july_csv: results/tiny-imagenet/phase1_results.csv   # repo-relative (tracked in git)
+  july_n: 10000               # ASSUMPTION: CSV has no count column; base.yaml val_subset_size = 10000
+  z: 1.96
+cfg_overrides: {}

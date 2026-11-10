@@ -1,0 +1,22 @@
+# W1 smoke test on the H100 slice (Imagenette, frozen 1000-way ImageNet head).
+#   ADVC_PLATFORM=h100-slice python run.py --exp configs/exp/smoke_imagenette.yaml \
+#       --set data.eval_cache=/path/to/imagenette_val_cache.pt
+# Without a cache it reads the ImageFolder at dataset.val_dir (base.yaml: /kaggle/working/imagenette2/val);
+# override with --set cfg_overrides.dataset.val_dir=/path/to/imagenette2/val
+# Estimated runtime: 1-3 min (estimate).
+name: smoke_imagenette
+type: smoke
+dataset: imagenette
+model: deit_small
+seed: 0
+tf32: false
+precisions: [fp32, int8, int4]
+data:
+  eval_cache: null
+  num_workers: 0              # slice has 1 CPU core
+smoke:
+  batch_size: 32
+  per_class: 4                # 10 classes x 4 = 40 stratified, first 32 used
+  subset_seed: 0
+  linf_tol: 0.0001
+cfg_overrides: {}

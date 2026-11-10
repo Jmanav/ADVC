@@ -1,0 +1,31 @@
+# Throughput calibration on the 10 GB H100 MIG slice (Imagenette). Measures R for §5.0
+# and checks whether TF32 is safe to enable (PGD-20 agreement on 200 images).
+#   ADVC_PLATFORM=h100-slice python run.py --exp configs/exp/calibrate_imagenette.yaml \
+#       --set data.eval_cache=/path/to/imagenette_val_cache.pt
+# Estimated runtime: 3-5 min (estimate; assumes R ~ 200 passes/s, §5.0).
+name: calibrate_imagenette
+type: calibrate
+dataset: imagenette
+model: deit_small
+seed: 0
+tf32: false
+precisions: [fp32, int8, int4]
+data:
+  eval_cache: null
+  batch_size: 32
+  num_workers: 0              # 1 CPU core on the slice
+calibrate:
+  per_class: 7                # 10 classes x 7 = 70 images >= max(batch_sizes)
+  subset_seed: 0
+  batch_sizes: [32, 64]
+  warmup_batches: 3
+  timed_batches: 10
+  tf32_modes: [false, true]
+  tf32_modes_quantized: [false]
+  loader_batches: 10
+  tf32_validation:
+    enabled: true
+    per_class: 20             # 10 classes x 20 = 200 images
+    subset_seed: 0
+    attacks: [clean, pgd20]
+cfg_overrides: {}

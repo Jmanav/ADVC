@@ -133,7 +133,7 @@ def _load_checkpoint(
     """
     if ckpt_path_full.is_file():
         print(f"[phase3] {label}: loading full model checkpoint from {ckpt_path_full} …")
-        loaded = torch.load(str(ckpt_path_full), map_location=device)
+        loaded = torch.load(str(ckpt_path_full), map_location=device, weights_only=False)  # full nn.Module pickle; torch>=2.6 defaults to weights_only=True
         loaded.eval()
         return loaded
     if ckpt_path_state.is_file():

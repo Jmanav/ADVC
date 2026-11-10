@@ -125,6 +125,15 @@ defense:
   # single-step FGSM AT (model exploits local linearity around clean images,
   # collapsing clean_acc and PGD robustness while train_adv_acc looks fine).
   random_start: true
+  # FGSM-RS step size and projection (revision C-03, Wong et al. 2020):
+  #   x0 = clip(x + U(-eps, eps)); x1 = clip(Proj_{B_inf(x,eps)}(x0 + alpha*sign(grad)))
+  # alpha = 1.25 * eps = 1.25 * 8/255 = 10/255 = 0.0392157
+  # Only used when random_start: true (plain FGSM path ignores these).
+  # Pre-revision (July 2026) recipe, kept ONLY for the appendix:
+  #   fgsm_rs_project: false + fgsm_rs_alpha: 0.03137  (no projection, step = eps;
+  #   training perturbation can reach 2*eps).
+  fgsm_rs_alpha: 0.0392157
+  fgsm_rs_project: true
   # Fraction of each batch trained on the ORIGINAL clean images instead of
   # adversarial ones (0.0 = pure AT, matches the original spec). Keeps the
   # decision boundary anchored to the clean data distribution.

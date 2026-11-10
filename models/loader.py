@@ -141,8 +141,10 @@ def load_model(
                   f"(missing={len(missing)}, unexpected={len(unexpected)})")
     elif compression == "int8":
         model = _load_int8(timm_name, device, num_classes, finetuned_state)
+        _print_bias_guard_report("INT8", install_fp32_bias_guard(model))
     elif compression == "int4":
         model = _load_int4(timm_name, config, device, num_classes, finetuned_state)
+        _print_bias_guard_report("INT4", install_fp32_bias_guard(model))
     else:
         raise ValueError(
             f"Unknown compression level: {compression!r}. "
@@ -236,30 +238,7 @@ def _load_int8(
         print(f"[loader] INT8: applied fine-tuned base pre-quant "
               f"(missing={len(missing)}, unexpected={len(unexpected)})")
 
-    def _replace_linear_int8(module: torch.nn.Module) -> None:
-        for name, child in module.named_children():
-            if isinstance(child, torch.nn.Linear):
-                new_layer = bnb.nn.Linear8bitLt(
-                    child.in_features,
-                    child.out_features,
-                    bias=child.bias is not None,
-                    has_fp16_weights=False,
-                )
-                # Must use Int8Params so bitsandbytes populates .CB on forward.
-                new_layer.weight = bnb.nn.Int8Params(
-                    child.weight.data.clone(),
-                    requires_grad=False,
-                    has_fp16_weights=False,
-                )
-                if child.bias is not None:
-                    new_layer.bias = torch.nn.Parameter(
-                        child.bias.data.clone(), requires_grad=False
-                    )
-                setattr(module, name, new_layer)
-            else:
-                _replace_linear_int8(child)
-
-    _replace_linear_int8(model)
+    replace_linear_int8(model)
     model = model.to(device)
 
     # Trigger .CB buffer population for all Linear8bitLt layers.
@@ -306,31 +285,7 @@ def _load_int4(
 
     model = model.to(device)
 
-    def _replace_linear_int4(module: torch.nn.Module) -> None:
-        for name, child in module.named_children():
-            if isinstance(child, torch.nn.Linear):
-                new_layer = bnb.nn.Linear4bit(
-                    child.in_features,
-                    child.out_features,
-                    bias=child.bias is not None,
-                    compute_dtype=compute_dtype,
-                    quant_type=quant_type,
-                )
-                new_layer.weight = bnb.nn.Params4bit(
-                    child.weight.data.clone(),
-                    requires_grad=False,
-                    quant_type=quant_type,
-                )
-                if child.bias is not None:
-                    new_layer.bias = torch.nn.Parameter(
-                        child.bias.data.clone(), requires_grad=False
-                    )
-                new_layer = new_layer.to(device)
-                setattr(module, name, new_layer)
-            else:
-                _replace_linear_int4(child)
-
-    _replace_linear_int4(model)
+    replace_linear_int4(model, compute_dtype, quant_type, device)
 
     # Explicitly disable gradients on all int4 weight tensors — Params4bit are
     # integer dtype and cannot hold gradients.
@@ -342,6 +297,299 @@ def _load_int4(
 
     print(f"[loader] INT4 (NF4): replaced Linear layers with bitsandbytes Int4 on {device}")
     return model
+
+
+def replace_linear_int8(module: torch.nn.Module) -> None:
+    """Swap every nn.Linear under `module` (in place, recursively) for a bnb
+    Linear8bitLt with the exact arguments the INT8 loader uses.
+
+    has_fp16_weights=False, default threshold (0.0). Weights become
+    bnb.nn.Int8Params (quantised to int8 when the module is moved to CUDA);
+    biases are copied as plain fp32 Parameters with requires_grad=False. The
+    caller moves the module to the device afterwards (as `_load_int8` does).
+    Factored out of `_load_int8` so tests can build the same layers.
+    """
+    import bitsandbytes as bnb
+
+    for name, child in module.named_children():
+        if isinstance(child, torch.nn.Linear):
+            new_layer = bnb.nn.Linear8bitLt(
+                child.in_features,
+                child.out_features,
+                bias=child.bias is not None,
+                has_fp16_weights=False,
+            )
+            # Must use Int8Params so bitsandbytes populates .CB on forward.
+            new_layer.weight = bnb.nn.Int8Params(
+                child.weight.data.clone(),
+                requires_grad=False,
+                has_fp16_weights=False,
+            )
+            if child.bias is not None:
+                new_layer.bias = torch.nn.Parameter(
+                    child.bias.data.clone(), requires_grad=False
+                )
+            setattr(module, name, new_layer)
+        else:
+            replace_linear_int8(child)
+
+
+def replace_linear_int4(
+    module: torch.nn.Module,
+    compute_dtype: torch.dtype,
+    quant_type: str,
+    device: str,
+) -> None:
+    """Swap every nn.Linear under `module` (in place, recursively) for a bnb
+    Linear4bit with the exact arguments the INT4 loader uses.
+
+    Each new layer gets Params4bit weights (quantised when moved to `device`)
+    and a plain fp32 bias Parameter with requires_grad=False, and is moved to
+    `device` individually (as `_load_int4` always did). Factored out of
+    `_load_int4` so tests can build the same layers.
+    """
+    import bitsandbytes as bnb
+
+    for name, child in module.named_children():
+        if isinstance(child, torch.nn.Linear):
+            new_layer = bnb.nn.Linear4bit(
+                child.in_features,
+                child.out_features,
+                bias=child.bias is not None,
+                compute_dtype=compute_dtype,
+                quant_type=quant_type,
+            )
+            new_layer.weight = bnb.nn.Params4bit(
+                child.weight.data.clone(),
+                requires_grad=False,
+                quant_type=quant_type,
+            )
+            if child.bias is not None:
+                new_layer.bias = torch.nn.Parameter(
+                    child.bias.data.clone(), requires_grad=False
+                )
+            new_layer = new_layer.to(device)
+            setattr(module, name, new_layer)
+        else:
+            replace_linear_int4(child, compute_dtype, quant_type, device)
+
+
+# ── fp32-bias guard for bitsandbytes layers (REVISION_PLAN C-04, Q12) ─────────
+#
+# Facts from the bitsandbytes sources (wheels unpacked read-only, nothing run):
+#
+# * Linear4bit, bnb 0.50.2 (nn/modules.py:626-635): forward first casts the
+#   input to compute_dtype (fp16 here), THEN does
+#   `if bias.dtype != x.dtype: bias.data = bias.data.to(x.dtype)` -> the STORED
+#   bias Parameter is overwritten in place with an fp16 copy on the first
+#   forward pass. All later updates by the optimiser then happen in fp16.
+# * Linear4bit, bnb 0.41.0 (nn/modules.py:232-248) and 0.43.0
+#   (nn/modules.py:405-433): the same in-place cast runs BEFORE the input is
+#   cast, i.e. against the caller's fp32 input, so the stored bias stays fp32;
+#   bnb then uses a differentiable fp16 copy `self.bias.to(compute_dtype)`.
+#   (Caveat: in these versions `compute_type_is_set` starts False
+#   (0.41:209, 0.43:374) and set_compute_type() switches compute_dtype to the
+#   input dtype for fp32 input (0.41:212-215, 0.43:378-382), so the configured
+#   float16 compute dtype was overridden to float32. 0.50.2 respects it
+#   (`compute_type_is_set = compute_dtype is not None`, nn/modules.py:569-570).)
+# * Linear8bitLt, all three versions (0.41:437-439, 0.43:683-685,
+#   0.50.2:1185-1187): `if bias.dtype != x.dtype: bias.data = ...to(x.dtype)`
+#   against the module's INPUT dtype. Our inputs are fp32 (no autocast), so the
+#   int8 biases stay fp32; the fp16 cast of the activations happens inside
+#   MatMul8bitLt (0.50.2 autograd/_functions.py:127-140) and does not touch the
+#   bias.
+# * The July 2026 checkpoints were trained with all biases float32
+#   (REVISION_PLAN A-3, runtime check of 2026-11-09).
+#
+# Because the 0.50.2 mutation happens INSIDE forward, casting once at load time
+# is not enough. The guard below is a pair of forward hooks on every bnb layer:
+# the pre-hook hands bnb a temporary, differentiable copy of the fp32 bias in
+# the dtype bnb is about to compare against (so bnb's in-place cast becomes a
+# no-op), and, for Linear4bit, pre-casts the input to compute_dtype exactly as
+# bnb itself would; the post-hook puts the fp32 Parameter back and restores the
+# output dtype bnb would have returned. Per the 0.41/0.43/0.50.2 sources the
+# tensors reaching the GEMM are bit-identical to the unguarded forward pass
+# (on <=0.43 the hooks never act: compute_dtype becomes fp32 = bias dtype; on
+# 0.50.2 bnb itself would feed fp16(bias) and fp16(x)); the only difference is
+# that the stored/trained bias stays fp32 (the July behaviour) and receives an
+# fp32 gradient through the copy. Versions 0.44-0.49 were not audited.
+# NOTE: the guard does NOT reproduce the <=0.43 fp32 compute override; on
+# 0.50.2 INT4 computes in the configured float16. Hooks are used
+# (not a subclass or an instance-level forward override) so the layers stay
+# genuine bnb classes and full-model pickles (`torch.save(model)`, INT4
+# checkpoints) remain picklable: the hook functions are module-level.
+
+_BIAS_MASTER = "_advc_bias_master"     # fp32 Parameter stashed during forward
+_BIAS_OUT_DTYPE = "_advc_out_dtype"    # output dtype to restore (Linear4bit only)
+_BIAS_GUARD_FLAG = "_advc_fp32_bias_guard"
+
+
+def _bnb_linear_classes() -> tuple:
+    """Return the bitsandbytes Linear classes present, or () if bnb is absent."""
+    try:
+        import bitsandbytes as bnb
+    except Exception:
+        return ()
+    classes = []
+    for name in ("Linear8bitLt", "Linear4bit"):
+        cls = getattr(bnb.nn, name, None)
+        if cls is not None:
+            classes.append(cls)
+    return tuple(classes)
+
+
+def _iter_bnb_layers(model: torch.nn.Module):
+    """Yield (name, module) for every bitsandbytes Linear8bitLt/Linear4bit."""
+    classes = _bnb_linear_classes()
+    if not classes:
+        return
+    for name, module in model.named_modules():
+        if isinstance(module, classes):
+            yield name, module
+
+
+def _is_linear4bit(module: torch.nn.Module) -> bool:
+    """True for bnb Linear4bit (and subclasses such as LinearNF4)."""
+    try:
+        import bitsandbytes as bnb
+    except Exception:
+        return False
+    return isinstance(module, bnb.nn.Linear4bit)
+
+
+def _restore_master_bias(module: torch.nn.Module) -> None:
+    """Put the stashed fp32 bias Parameter back into module._parameters."""
+    master = module.__dict__.get(_BIAS_MASTER)
+    if master is not None:
+        module._parameters["bias"] = master
+        module.__dict__[_BIAS_MASTER] = None
+
+
+def _bias_target_dtype(module: torch.nn.Module, x: torch.Tensor) -> torch.dtype | None:
+    """dtype the bnb forward compares the bias against, or None if bnb would
+    not touch the bias / the compute dtype is not yet fixed."""
+    if _is_linear4bit(module):
+        # Before the first forward on bnb <=0.43, compute_type_is_set is False and
+        # bnb may still switch compute_dtype to the input dtype: do not interfere.
+        if not getattr(module, "compute_type_is_set", False):
+            return None
+        return getattr(module, "compute_dtype", None)
+    return x.dtype  # Linear8bitLt: bias is cast to the module-input dtype
+
+
+def _bnb_bias_pre_hook(module: torch.nn.Module, args: tuple):
+    """Forward pre-hook: keep the stored bias fp32 (see block comment above)."""
+    _restore_master_bias(module)  # self-heal if a previous forward raised
+    bias = module._parameters.get("bias")
+    if bias is None or not args or not torch.is_tensor(args[0]):
+        return None
+    x = args[0]
+    target = _bias_target_dtype(module, x)
+    if target is None or target == bias.dtype:
+        return None
+    module.__dict__[_BIAS_MASTER] = bias
+    # Differentiable copy: grads flow back to the fp32 Parameter as fp32.
+    # requires_grad of the copy equals the Parameter's, so bnb picks the same
+    # (grad / no-grad) kernel path as it would unguarded.
+    module._parameters["bias"] = bias.to(target)
+    if _is_linear4bit(module) and x.dtype != target:
+        # Linear4bit: cast the input to compute_dtype here, exactly as bnb does,
+        # so bnb's own bias check (against x.dtype, before or after its cast
+        # depending on version) sees matching dtypes and does nothing.
+        module.__dict__[_BIAS_OUT_DTYPE] = x.dtype
+        return (x.to(target),) + tuple(args[1:])
+    return None
+
+
+def _bnb_bias_post_hook(module: torch.nn.Module, args: tuple, output):
+    """Forward hook: restore the fp32 bias Parameter and the bnb output dtype."""
+    _restore_master_bias(module)
+    out_dtype = module.__dict__.get(_BIAS_OUT_DTYPE)
+    module.__dict__[_BIAS_OUT_DTYPE] = None
+    if out_dtype is not None and torch.is_tensor(output) and output.dtype != out_dtype:
+        # bnb returns `out.to(inp_dtype)`; inp_dtype was the caller's dtype before
+        # the pre-hook cast, so restore exactly that cast.
+        return output.to(out_dtype)
+    return None
+
+
+def enforce_fp32_biases(model: torch.nn.Module) -> dict:
+    """Cast any non-fp32 bias of bitsandbytes Linear layers back to fp32.
+
+    Keeps Parameter identity and requires_grad (only `.data` is replaced), so
+    optimisers holding the Parameter keep working.
+
+    Args:
+        model: Any module; non-bnb layers are ignored.
+
+    Returns:
+        {"n_bnb_layers": int, "n_cast": int, "dtypes_before": {dtype_str: count}}
+    """
+    n_layers = n_cast = 0
+    dtypes_before: dict = {}
+    for _, module in _iter_bnb_layers(model):
+        n_layers += 1
+        _restore_master_bias(module)
+        bias = module._parameters.get("bias")
+        if bias is None:
+            continue
+        key = str(bias.dtype).replace("torch.", "")
+        dtypes_before[key] = dtypes_before.get(key, 0) + 1
+        if bias.dtype != torch.float32:
+            bias.data = bias.data.to(torch.float32)
+            n_cast += 1
+    return {"n_bnb_layers": n_layers, "n_cast": n_cast, "dtypes_before": dtypes_before}
+
+
+def install_fp32_bias_guard(model: torch.nn.Module) -> dict:
+    """Cast bnb biases to fp32 now and install the forward hooks that keep them
+    fp32 across every later forward/backward (idempotent).
+
+    Returns the enforce_fp32_biases() report plus "n_hooked" (layers that got
+    hooks in this call; 0 when already guarded).
+    """
+    report = enforce_fp32_biases(model)
+    n_hooked = 0
+    for _, module in _iter_bnb_layers(model):
+        if module.__dict__.get(_BIAS_GUARD_FLAG):
+            continue
+        module.register_forward_pre_hook(_bnb_bias_pre_hook)
+        try:
+            # always_call: restore the Parameter even if forward raises (torch>=2.0).
+            module.register_forward_hook(_bnb_bias_post_hook, always_call=True)
+        except TypeError:
+            module.register_forward_hook(_bnb_bias_post_hook)
+        module.__dict__[_BIAS_GUARD_FLAG] = True
+        n_hooked += 1
+    report["n_hooked"] = n_hooked
+    return report
+
+
+def assert_fp32_biases(model: torch.nn.Module) -> None:
+    """Raise AssertionError if any bnb layer's bias is not an fp32 Parameter
+    (or its gradient, if present, is not fp32). Use after loading, training
+    or a forward/backward pass."""
+    bad = []
+    for name, module in _iter_bnb_layers(model):
+        bias = module._parameters.get("bias")
+        if bias is None:
+            continue
+        if not isinstance(bias, torch.nn.Parameter):
+            bad.append(f"{name}.bias is {type(bias).__name__}, not Parameter")
+        elif bias.dtype != torch.float32:
+            bad.append(f"{name}.bias dtype={bias.dtype}")
+        elif bias.grad is not None and bias.grad.dtype != torch.float32:
+            bad.append(f"{name}.bias.grad dtype={bias.grad.dtype}")
+    if bad:  # explicit raise: must survive `python -O`
+        raise AssertionError("non-fp32 bnb biases: " + "; ".join(bad[:10]) + (
+            f" (+{len(bad) - 10} more)" if len(bad) > 10 else ""))
+
+
+def _print_bias_guard_report(tag: str, report: dict) -> None:
+    """Print the one-line [loader] summary of install_fp32_bias_guard()."""
+    print(f"[loader] {tag}: fp32-bias guard — bnb_layers={report['n_bnb_layers']}, "
+          f"cast={report['n_cast']}, dtypes_before={report['dtypes_before']}, "
+          f"hooked={report['n_hooked']}")
 
 
 def _get_hf_name(timm_name: str, config: dict) -> str:

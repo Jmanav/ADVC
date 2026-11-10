@@ -92,6 +92,32 @@ source, may be a `/kaggle/input` mount) AND `--out` (writable, e.g. `/kaggle/wor
 Writing `train_if/`/`val_if/` into a read-only mount raises `Errno 30`. `configs/base.yaml` points
 tiny-imagenet dirs at `/kaggle/working/tiny_if/...`. Never symlink the read-only mount as the output.
 
+### Revision harness, bias guard, tensor cache (branch `revision-w1`, 2026-11)
+
+- **`run.py --exp configs/exp/<name>.yaml`** — unified runner for revision
+  experiments (smoke / calibrate / repro_check / eval). Writes one JSON per run
+  to `results/<dataset>/runs/<run_id>.json` (+ `.traceback.txt` on error) with
+  env, seeds, subset sha, per-image flags and Wilson 95% CIs (`utils/runlog.py`,
+  `utils/eval_core.py`). Resume matches (precision, attack, checkpoint name +
+  resolved path, attack signature, subset sha, seed, tf32). The legacy phase
+  scripts and their CSVs are unchanged and remain the source for July numbers.
+- **fp32-bias guard** (`models/loader.py:install_fp32_bias_guard`). bnb 0.50.2
+  `Linear4bit.forward` casts the bias to fp16 IN PLACE (`nn/modules.py:632-634`),
+  so after the first forward the trainable bias Parameter silently becomes fp16.
+  The guard (forward pre/post hooks) keeps the master bias fp32 with identical
+  forward numerics. `load_model()` installs it for int8/int4; anything that
+  `torch.load`s a full INT4 pickle must call `install_fp32_bias_guard()` itself
+  (`run.py` does). Also: bnb 0.50.2 INT8 casts fp32 activations to fp16 inside
+  `MatMul8bitLt` — state this in the paper (REVISION_PLAN Q5).
+- **INT4 full-model pickles need `torch.load(..., weights_only=False)`** —
+  torch ≥2.6 defaults to `weights_only=True` and cannot unpickle nn.Modules.
+- **Tensor cache** (`utils/tensor_cache.py`, `scripts/build_tensor_cache.py`).
+  Eval cache stores uint8 after the repo's Resize+CenterCrop and is bit-exact
+  with the PIL pipeline (`--verify`). Train cache augments with torchvision v2
+  RandomResizedCrop — NOT pixel-identical to PIL; say so in the methods.
+- **Pins:** `requirements.lock` (bitsandbytes==0.50.2; others pending env_report
+  via `scripts/env_report.py`).
+
 ### Attack interface (every attack must match this signature)
 
 ```python
@@ -363,6 +389,18 @@ and `at_kd.py`) combines two mitigations from the AT robustness literature:
 This is a deliberate, documented deviation from vanilla single-step FGSM AT —
 cite it in the paper's methodology as "FGSM-RS with 50% clean/adversarial
 batch mixing," not plain "FGSM adversarial training."
+
+**Revision C-03 (2026-11, branch `revision-w1`): FGSM-RS now projects.** The
+July implementation took a full eps step from the random start WITHOUT
+projecting back onto the eps-ball, so training perturbations could reach 2·eps
+(and used alpha = eps). It is now `defenses/common.py:fgsm_rs()`, matching
+Wong et al. 2020 (arXiv:2001.03994, Alg. 1): uniform start in pixel space,
+step alpha = 1.25·eps = 10/255 (`defense.fgsm_rs_alpha`), projection onto
+B∞(x, eps) then clamp to [0,1] (`defense.fgsm_rs_project: true`). Both defense
+files call it; teacher and student still share the same `adv_images`. The
+July recipe (`project: false`, `alpha: 0.03137`) is kept ONLY to describe the
+appendix runs — all main-paper AT/AT+KD checkpoints must be retrained with the
+fix. Test: `tests/test_fgsm_rs.py`.
 
 **Guardrail history:** both defense scripts print
 `[AT] Pre-training baseline clean_acc=...` before epoch 1 and warn loudly

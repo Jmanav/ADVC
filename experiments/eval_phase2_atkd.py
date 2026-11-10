@@ -366,7 +366,7 @@ def load_atkd_checkpoint(
             f"[phase2-ATKD] {compression:<6}: loading full model checkpoint "
             f"from {full_model_path} …"
         )
-        loaded_model = torch.load(str(full_model_path), map_location="cpu")
+        loaded_model = torch.load(str(full_model_path), map_location="cpu", weights_only=False)  # full nn.Module pickle; torch>=2.6 defaults to weights_only=True
         loaded_model.eval()
         print(f"[phase2-ATKD] {compression:<6}: full model checkpoint loaded.")
         return loaded_model
