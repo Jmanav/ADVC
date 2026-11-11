@@ -98,3 +98,62 @@ all 49: {bias_dtype: float32, compute_dtype: float16, compute_type_is_set: True,
   - The earlier repro_check estimate (8–12 min) assumed the §5.0 rate and is about 6× too low.
   - Revised: about 60–70 min (HYPOTHESIS until calibrate_tiny runs).
 - **Wilson test failure** is float rounding at k = n. Fixed in `utils/runlog.py` (exact 0/1 bounds at k = 0 and k = n).
+
+---
+
+## R-002 · W1b INT8 probes · 2026-11-11
+
+- **Notebook:** `notebooks/w1b_int8_probe_kaggle.ipynb`. Kaggle version: *not given*.
+- **Git:** `d7f03bc` (branch `revision-w1`).
+- **Platform:** Kaggle Tesla T4. torch 2.11.0+cu130, bnb 0.50.2.
+- **Input:** `jainmanav20/advc-results`.
+
+### P1: `Linear8bitLt(384, N)`, fp32 input, forward + backward-to-input, by batch size (verbatim)
+
+```
+N        1    2    4    8   15   16   17   31   32   33   64
+200     ok   ok   ok   ok   ok   ok    X    X    X    X    X
+208     ok   ok   ok   ok   ok   ok   ok   ok   ok   ok   ok
+216     ok   ok   ok   ok   ok   ok    X    X    X    X    X
+224     ok   ok   ok   ok   ok   ok   ok   ok   ok   ok   ok
+232     ok   ok   ok   ok   ok   ok    X    X    X    X    X
+240     ok   ok   ok   ok   ok   ok   ok   ok   ok   ok   ok
+256     ok   ok   ok   ok   ok   ok   ok   ok   ok   ok   ok
+384     ok   ok   ok   ok   ok   ok   ok   ok   ok   ok   ok
+1000    ok   ok   ok   ok   ok   ok    X    X    X    X    X
+1024    ok   ok   ok   ok   ok   ok   ok   ok   ok   ok   ok
+X = RuntimeError: cublasLt ran into an error!  (cuda context ok after error)
+```
+
+### P2: head padded from 200 to P rows (padding rows are copies of real rows), logits sliced to 200 (verbatim)
+
+```
+{"P": 208, "CB_rows_equal": true, "SCB_rows_equal": true, "max_abs_200_vs_padded_bs1": 0.0, "max_abs_padded_bs32_vs_bs1": 0.0, "max_abs_padded_bs32_vs_fp32_ref": 0.016421109437942505, "max_abs_200_bs1_vs_fp32_ref": 0.016421109437942505, "argmax_agree_padded_vs_200": 1.0}
+{"P": 224, "CB_rows_equal": true, "SCB_rows_equal": true, "max_abs_200_vs_padded_bs1": 0.0, "max_abs_padded_bs32_vs_bs1": 0.0, "max_abs_padded_bs32_vs_fp32_ref": 0.015977390110492706, "max_abs_200_bs1_vs_fp32_ref": 0.015977390110492706, "argmax_agree_padded_vs_200": 1.0}
+{"P": 256, "CB_rows_equal": true, "SCB_rows_equal": true, "max_abs_200_vs_padded_bs1": 0.0, "max_abs_padded_bs32_vs_bs1": 0.0, "max_abs_padded_bs32_vs_fp32_ref": 0.01613175868988037, "max_abs_200_bs1_vs_fp32_ref": 0.01613175868988037, "argmax_agree_padded_vs_200": 1.0}
+```
+
+### P3: `load_model(int8_state_dict=)` with `at/at_int8_epoch07.pt` (verbatim)
+
+```
+load: OK, missing: [], unexpected: []
+int8_weights_equal_saved: [49, 0]   biases_equal_saved: [49, 0]   norm_params_equal_saved: 50 / 50
+logits_finite: true   max_abs_logit_diff_vs_untrained_base: 2.84375
+```
+
+### T: `tests/test_runlog.py`: 14 passed (4.3 s). P3 wall time 21.4 s.
+
+### Reading
+
+- **CONFIRMED (T4, bnb 0.50.2).** In the tested set, int8 cuBLASLt fails at batch > 16 exactly when N ≡ 8 (mod 16): N = 200, 216, 232, 1000.
+  - Every multiple of 16 that was tested (208, 224, 240, 256, 384, 1024) works at every batch size.
+  - The general "multiple of 16" rule is a HYPOTHESIS beyond the tested N; 1008 was not tested.
+  - DeiT-S's other INT8 layers (384, 1152, 1536 outputs) are multiples of 16, so only the head is affected.
+  - **The Imagenette 1000-way INT8 head is affected too on T4.** The H100 is UNVERIFIED (different kernels); run P1 there.
+- **CONFIRMED.** Padding the 200-way head is numerically exact:
+  - The int8 weights and per-row scales of the real rows are bit-identical.
+  - The logits are bit-identical to the unpadded layer at batch 1 and independent of batch size (max abs diff 0.0).
+  - The input-gradient equivalence was NOT measured (P2 compared forwards only). UNVERIFIED.
+- **CONFIRMED.** The INT8 reload fix restores a July INT8 checkpoint exactly: all 49 int8 weights, 49 biases and 50 norm tensors match the saved file.
+- **CONFIRMED.** The Wilson fix passes its test.
+- HYPOTHESIS, strongly supported: the July/Q4 INT8 per-epoch sweep failure (A-13) was this head error, since it evaluated at batch 32.

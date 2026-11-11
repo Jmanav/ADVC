@@ -114,9 +114,17 @@ tiny-imagenet dirs at `/kaggle/working/tiny_if/...`. Never symlink the read-only
   Linear8bitLt is not supported" — confirmed on Kaggle 2026-11-10, RESULTS_LOG R-001).
   Use `load_model(..., int8_state_dict=sd)`; `run.py` does. The legacy phase
   scripts' `--skip-training` INT8 path still loads after, and will fail.
-- **Open (W1b):** bnb 0.50.2 INT8 head (200 outputs) raises `cublasLt ran into
-  an error` at batch 32 on a T4 (works at batch 1). Do not run INT8 TinyImageNet
-  jobs until W1b P1/P2 settle the fix (RESULTS_LOG R-001).
+- **INT8 head padding (decided 2026-11-11).** On a T4 with bnb 0.50.2, int8
+  cuBLASLt raises `cublasLt ran into an error` for batch > 16 whenever
+  out_features ≡ 8 (mod 16) — both the 200-way and the 1000-way heads
+  (RESULTS_LOG R-002). The INT8 loader therefore pads such layers to a multiple
+  of 16 (`load_model(..., int8_pad_multiple=16)`, the default) with copies of real
+  rows and slices the extra outputs off in a forward hook. Measured bit-identical
+  int8 weights, scales and logits (R-002); the full-model gradient check is W1c P4.
+  INT8 state_dicts saved from a padded model have 208 (or 1008) head rows; old
+  200-row checkpoints are padded on load (`pad_int8_state_dict`). Paper: one
+  sentence in the methods ("the INT8 classifier is padded to a multiple of 16
+  output rows for the cuBLASLt kernel; this does not change its outputs").
 - **INT4 full-model pickles need `torch.load(..., weights_only=False)`** —
   torch ≥2.6 defaults to `weights_only=True` and cannot unpickle nn.Modules.
 - **Tensor cache** (`utils/tensor_cache.py`, `scripts/build_tensor_cache.py`).

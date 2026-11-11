@@ -111,6 +111,7 @@ def load_model(
     device: str = "cuda",
     int8_state_dict: dict | None = None,
     int8_strict: bool = True,
+    int8_pad_multiple: int = 16,
 ) -> torch.nn.Module:
     """
     Load a DeiT model at the specified compression level.
@@ -127,6 +128,10 @@ def load_model(
             2026-11-10, REVISION_PLAN A-13). The load result is left on
             `model._advc_int8_load` as {"missing": [...], "unexpected": [...]}.
         int8_strict: strict flag for that load_state_dict.
+        int8_pad_multiple: int8 only — pad Linear out_features up to this
+            multiple before quantising (0 disables). On a T4 with bnb 0.50.2,
+            int8 cuBLASLt raises for batch > 16 when out_features ≡ 8 (mod 16),
+            e.g. the 200- and 1000-way heads; padding is bit-exact (R-002).
 
     Returns:
         model: torch.nn.Module in eval mode, moved to device.
@@ -150,7 +155,8 @@ def load_model(
                   f"(missing={len(missing)}, unexpected={len(unexpected)})")
     elif compression == "int8":
         model = _load_int8(timm_name, device, num_classes, finetuned_state,
-                           int8_state_dict=int8_state_dict, int8_strict=int8_strict)
+                           int8_state_dict=int8_state_dict, int8_strict=int8_strict,
+                           pad_multiple=int8_pad_multiple)
         _print_bias_guard_report("INT8", install_fp32_bias_guard(model))
     elif compression == "int4":
         model = _load_int4(timm_name, config, device, num_classes, finetuned_state)
@@ -223,6 +229,7 @@ def _load_int8(
     finetuned_state: dict | None = None,
     int8_state_dict: dict | None = None,
     int8_strict: bool = True,
+    pad_multiple: int = 16,
 ) -> torch.nn.Module:
     """
     Load INT8 quantized model via bitsandbytes Linear8bitLt.
@@ -250,13 +257,20 @@ def _load_int8(
         print(f"[loader] INT8: applied fine-tuned base pre-quant "
               f"(missing={len(missing)}, unexpected={len(unexpected)})")
 
+    # Pad Linear layers whose out_features is not a multiple of `pad_multiple`
+    # (in DeiT-S only the head: 200 or 1000) BEFORE quantising; a forward hook
+    # slices the extra outputs off. See pad_linear_out_features().
+    padded = pad_linear_out_features(model, pad_multiple) if pad_multiple else {}
     replace_linear_int8(model)
+    install_out_slice_hooks(model, padded)
     model = model.to(device)
 
     # A saved INT8 state_dict must be loaded after .to(cuda) (weights quantised,
     # weight.SCB set) but BEFORE the first forward, which moves SCB into
     # layer.state and sets weight.SCB=None (bnb 0.50.2 nn/modules.py:1142-1163).
     if int8_state_dict is not None:
+        if padded:
+            int8_state_dict = pad_int8_state_dict(int8_state_dict, padded)
         res = model.load_state_dict(int8_state_dict, strict=int8_strict)
         model._advc_int8_load = {"missing": list(res.missing_keys),
                                  "unexpected": list(res.unexpected_keys)}
@@ -267,6 +281,17 @@ def _load_int8(
     with torch.no_grad():
         dummy = torch.zeros(1, 3, 224, 224, device=device)
         model(dummy)
+        # Fail loudly at load time (not mid-run) if a padded width still hits the
+        # cuBLASLt error: batch 33 was failing for N=200/1000 on T4 (R-002).
+        mods = dict(model.named_modules())
+        for name, (true_n, padded_n) in padded.items():
+            layer = mods[name]
+            out = layer(torch.randn(33, layer.in_features, device=device))
+            assert out.shape[-1] == true_n, (name, tuple(out.shape), true_n)
+        if padded:
+            print(f"[loader] INT8: padded out_features for cuBLASLt (multiple of {pad_multiple}): "
+                  + ", ".join(f"{n} {a}->{b}" for n, (a, b) in padded.items())
+                  + "; batch-33 self-check OK, outputs sliced back")
 
     print(f"[loader] INT8 (bitsandbytes Linear8bitLt): quantized Linear weights to int8 on {device}")
     return model
@@ -354,6 +379,79 @@ def replace_linear_int8(module: torch.nn.Module) -> None:
             setattr(module, name, new_layer)
         else:
             replace_linear_int8(child)
+
+
+# ── INT8 out_features padding (cuBLASLt shape workaround, RESULTS_LOG R-002) ──
+#
+# On a T4 (sm_75) with bnb 0.50.2, int8 cuBLASLt raises "cublasLt ran into an
+# error!" for batch > 16 whenever out_features ≡ 8 (mod 16) — N = 200, 216, 232,
+# 1000 failed; every tested multiple of 16 worked. LLM.int8 quantises weights per
+# output row and activations per input row, so adding extra output rows and
+# slicing them off changes nothing: R-002 measured bit-identical int8 weights,
+# per-row scales and logits (max abs diff 0.0). Extra rows are COPIES of the
+# first real rows (not zeros) so no row has an all-zero absmax scale.
+
+def pad_linear_out_features(module: torch.nn.Module, multiple: int, prefix: str = "") -> dict:
+    """Widen (in place, recursively) every nn.Linear whose out_features is not a
+    multiple of `multiple`. Returns {qualified_name: (true_out, padded_out)}.
+    Call on the fp32 model BEFORE replace_linear_int8; then call
+    install_out_slice_hooks() on the quantised model."""
+    padded: dict = {}
+    for name, child in module.named_children():
+        full = f"{prefix}.{name}" if prefix else name
+        if isinstance(child, torch.nn.Linear):
+            n = child.out_features
+            if n % multiple:
+                p = -(-n // multiple) * multiple
+                extra = p - n
+                if extra > n:
+                    raise ValueError(f"{full}: cannot pad {n} -> {p} with copies of real rows")
+                new = torch.nn.Linear(child.in_features, p, bias=child.bias is not None,
+                                      device=child.weight.device, dtype=child.weight.dtype)
+                with torch.no_grad():
+                    new.weight.copy_(torch.cat([child.weight, child.weight[:extra]]))
+                    if child.bias is not None:
+                        new.bias.copy_(torch.cat([child.bias, child.bias[:extra]]))
+                setattr(module, name, new)
+                padded[full] = (n, p)
+        else:
+            padded.update(pad_linear_out_features(child, multiple, full))
+    return padded
+
+
+def _slice_out_hook(module: torch.nn.Module, inputs, output):  # noqa: ANN001
+    """Forward hook: drop the padding outputs (module-level so it pickles)."""
+    n = module._advc_true_out
+    return output[..., :n] if torch.is_tensor(output) else output
+
+
+def install_out_slice_hooks(model: torch.nn.Module, padded: dict) -> None:
+    """Register _slice_out_hook on every padded layer (idempotent)."""
+    mods = dict(model.named_modules())
+    for name, (true_n, _p) in padded.items():
+        m = mods[name]
+        m._advc_true_out = int(true_n)
+        if not getattr(m, "_advc_slice_hook_installed", False):
+            m.register_forward_hook(_slice_out_hook)
+            m._advc_slice_hook_installed = True
+
+
+def pad_int8_state_dict(sd: dict, padded: dict) -> dict:
+    """Return a copy of `sd` whose padded layers' per-row tensors (weight, bias,
+    SCB) are padded the same way pad_linear_out_features pads them. Tensors that
+    already have the padded length (checkpoints saved from a padded model) are
+    left as they are; any other length raises."""
+    out = dict(sd)
+    for name, (n, p) in padded.items():
+        for key in (f"{name}.weight", f"{name}.bias", f"{name}.SCB", f"{name}.weight.SCB"):
+            v = sd.get(key)
+            if not torch.is_tensor(v) or v.dim() == 0:
+                continue
+            if v.shape[0] == n:
+                out[key] = torch.cat([v, v[: p - n]])
+            elif v.shape[0] != p:
+                raise ValueError(f"{key}: expected {n} or {p} rows, got {tuple(v.shape)}")
+    return out
 
 
 def replace_linear_int4(
