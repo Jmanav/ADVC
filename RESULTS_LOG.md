@@ -157,3 +157,66 @@ logits_finite: true   max_abs_logit_diff_vs_untrained_base: 2.84375
 - **CONFIRMED.** The INT8 reload fix restores a July INT8 checkpoint exactly: all 49 int8 weights, 49 biases and 50 norm tensors match the saved file.
 - **CONFIRMED.** The Wilson fix passes its test.
 - HYPOTHESIS, strongly supported: the July/Q4 INT8 per-epoch sweep failure (A-13) was this head error, since it evaluated at batch 32.
+
+---
+
+## R-003 · W1c: INT8 padding check, smoke, calibrate · 2026-11-12
+
+- **Notebook:** `notebooks/w1c_checks_kaggle.ipynb`. Kaggle version: *not given*.
+- **Git:** `ec45a91` (branch `revision-w1`).
+- **Platform:** Kaggle Tesla T4. torch 2.11.0+cu130, bnb 0.50.2.
+- **Inputs:** `jainmanav20/advc-results`, `albert1994/tinyimagenet`.
+- **Run JSONs:** smoke `20261112T055011Z-8df825ed`, calibrate `20261112T055244Z-f57b81c4`.
+- **Exit codes:** all 0.
+  - Wall times: prepare_tiny 117.4 s, pytest_all 15.2 s, p4 23.5 s, smoke 153.0 s, calibrate 108.9 s.
+- **Tests:** 39 passed in 9.32 s.
+
+### P4: full DeiT-S INT8, padded (208) vs unpadded (200) head, 16 real val images (verbatim)
+
+```
+base:        logits_bit_equal true, max_abs 0.0, pred_agree 1.0, acc16 [0.9375, 0.9375],
+             grad_bit_equal false, grad_max_abs 1.0011717677116394e-08, grad_rel 9.731061254569795e-07, grad_sign_agree 1.0,
+             padded_bs32 ok, acc32 0.84375, grad_finite true
+at_int8_ep7: logits_bit_equal true, max_abs 0.0, pred_agree 1.0, acc16 [0.9375, 0.9375],
+             grad_bit_equal false, grad_max_abs 2.3515895009040833e-08, grad_rel 8.729399496587575e-07, grad_sign_agree 1.0,
+             padded_bs32 ok, acc32 0.90625, grad_finite true
+```
+
+### Smoke (1 batch of 32, seed 0; cudnn deterministic=True, benchmark=False) (verbatim)
+
+```
+precision  load  forward  backward      fgsm            pgd20           clean/fgsm/pgd20 correct
+fp32       ok    ok       ok |g|=0.325  ok linf=0.0314  ok linf=0.0314  24/4/0 of 32
+int8       ok    ok       ok |g|=0.312  ok linf=0.0314  ok linf=0.0314  23/4/0 of 32
+int4       ok    ok       ok |g|=0.308  ok linf=0.0314  ok linf=0.0314  24/8/0 of 32
+pgd20 step seconds: fp32 40.6603, int8 43.6166, int4 40.8284
+linf_pixel 0.031370095908641815 for every attack (eps 0.03137)
+MatMul8bitLt fp32->fp16 cast notice: counted 1275 (logging channel), suppressed
+```
+
+### Calibrate (GPU-only, fixed batch, 3 warm-up + 10 timed; cudnn deterministic=True, benchmark=False) (verbatim)
+
+```
+precision  tf32   bs  fwd img/s  fwd+bwd passes/s  peak GB
+fp32       False  16  318.5      133.7             1.08
+fp32       False  32  296.1      14.2              2.059
+int8       False  16  383.4      140.8             1.043
+int8       False  32  383.7      15.1              2.043
+int4       False  16  613.2      223.6             0.677
+int4       False  32  625.8      15.5              1.323
+loader: 29.5 img/s (image_folder, num_workers=2, 160 images, includes worker start-up)
+```
+
+### Reading
+
+- **CONFIRMED.** The padded INT8 head is equivalent to the unpadded one in the full model.
+  - Logits are bit-identical.
+  - Input gradients differ only by float rounding (relative max diff < 1e-6) and have identical signs, so FGSM/PGD steps are identical.
+  - It holds for the base model and for a July defended checkpoint.
+- **CONFIRMED.** INT8 now runs at batch 32. All three precisions pass load, forward, backward, FGSM and PGD-20, and every perturbation is within eps.
+- **CONFIRMED (this setup).** Forward+backward at batch 32 is ~9–14× slower than at batch 16 at every precision, including fp32. Forward-only is not slowed.
+  - Because fp32 is affected too, the cause is not bitsandbytes.
+  - HYPOTHESIS: `cudnn.deterministic=True` (set only by the new harness, `utils/seeding.py:66`; the July scripts never set it) selects a slow algorithm for the patch-embedding Conv2d backward at batch 32. To be tested in W1d.
+  - The smoke PGD-20 time (~41 s for 32 images) matches the slow batch-32 rate, so R-001's "~17 passes/s" was this slowdown, not the T4's real speed.
+- **Rates at batch 16** (fwd+bwd passes/s): fp32 133.7, int8 140.8, int4 223.6. These are the planning rates for TinyImageNet until W1d.
+- **Loader rate** of 29.5 img/s is UNVERIFIED as a steady-state rate (only 160 images, worker start-up included). If real, it would bottleneck training; measure it properly in W1d.
