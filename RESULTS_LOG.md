@@ -220,3 +220,65 @@ loader: 29.5 img/s (image_folder, num_workers=2, 160 images, includes worker sta
   - The smoke PGD-20 time (~41 s for 32 images) matches the slow batch-32 rate, so R-001's "~17 passes/s" was this slowdown, not the T4's real speed.
 - **Rates at batch 16** (fwd+bwd passes/s): fp32 133.7, int8 140.8, int4 223.6. These are the planning rates for TinyImageNet until W1d.
 - **Loader rate** of 29.5 img/s is UNVERIFIED as a steady-state rate (only 160 images, worker start-up included). If real, it would bottleneck training; measure it properly in W1d.
+
+---
+
+## R-004 · W1d: batch-size slowdown + loader probe · 2026-11-13
+
+- **Notebook:** `notebooks/w1d_timing_probe_kaggle.ipynb`. Kaggle version: *not given*.
+- **Commit:** `2bc09d2`. torch 2.11.0+cu130 | bnb 0.50.2 | Tesla T4. 4 CPUs.
+- **Earlier attempt (commit `b6ed7bd`) failed:** the session had no GPU (`torch.cuda.is_available() is False` at the first `torch.load(map_location='cuda')`, 9.1 s, exit 1). The notebook was not at fault; the accelerator was not set. `2bc09d2` adds a GPU assert to the setup cell.
+- **Wall times:** p5_gpu 150.2 s (exit 0), p6_loader 113.9 s (exit 0).
+- Modes: `det1_bench0` = cudnn deterministic True / benchmark False (the harness default, `utils/seeding.py:66`); `det0_bench0` = both False (PyTorch default, which is what the July scripts ran with); `det0_bench1` = deterministic False / benchmark True. TF32 off throughout. Random inputs, 2 warm-up + 5 timed steps.
+
+### A: fwd+bwd-to-input passes/s (verbatim values)
+
+```
+              bs16   bs24   bs32   bs48   bs64
+fp32 det1_b0  139.4  15.9   15.5   133.5  135.2
+fp32 det0_b0  135.9  133.5  132.2  132.1  132.4
+fp32 det0_b1  132.7  130.6  127.8  127.4  127.1
+int4 det1_b0  201.8  14.8   14.6   214.7  217.7
+int4 det0_b0  213.1  213.9  217.6  221.7  222.1
+int4 det0_b1  215.8  216.9  219.7  223.5  225.3
+```
+
+### B: patch-embedding Conv2d(3,384,16,16) alone, backward-to-input, images/s (verbatim values)
+
+```
+              bs16    bs32    bs64
+det1_bench0   7976.0  16.5    7746.6
+det0_bench0   7292.1  9115.1  9818.3
+det0_bench1   7931.6  9909.2  10096.6
+```
+
+### C: same fp32 bs32 input gradient computed twice in one process (verbatim)
+
+```
+det1_bench0  bit_equal true   max_abs_diff 0.0       sign_agree 1.0
+det0_bench0  bit_equal true   max_abs_diff 0.0       sign_agree 1.0
+det0_bench1  bit_equal false  max_abs_diff 3.78e-10  sign_agree 1.0
+```
+
+### D: DataLoader, first batch excluded, same 1+40·bs images for both worker counts (verbatim)
+
+```
+val_eval    bs32  workers2  1249 images  46.62 s  26.8 img/s
+val_eval    bs32  workers4  1249 images   1.60 s  778.8 img/s
+train_train bs16  workers2   625 images  22.24 s  28.1 img/s
+train_train bs16  workers4   625 images   0.91 s  685.5 img/s
+```
+
+### Reading
+
+- **CONFIRMED (T4, this torch/cuDNN).** The slowdown is the patch-embedding conv backward under `cudnn.deterministic=True`, at batch 24 and 32 only.
+  - Conv alone: 16.5 img/s at bs32 vs ~8000 at bs16/64.
+  - Whole model: bs24/32 are ~9–15× slower; bs16/48/64 are normal.
+  - It does not occur with deterministic=False (both benchmark settings). Precision is irrelevant (fp32 and int4 identical pattern).
+- **Measured rates without the slowdown** (det0_bench0): fp32 ~132–136, int4 ~213–222 fwd+bwd passes/s, flat across bs16–64. INT8 was not in W1d; R-003 bs16 = 140.8.
+- **CONFIRMED (one repeat, one process).** det0_bench0 gave a bit-identical bs32 input gradient; benchmark=True did not (3.8e-10, signs identical). Not shown: cross-process or cross-session reproducibility under det0_bench0.
+- **Loader: the workers2→workers4 jump is confounded.** Both worker counts read the *same* images, workers2 first.
+  - `/kaggle/working/tiny_if` holds symlinks into the `/kaggle/input` mount (`scripts/prepare_tiny_imagenet.py:40-47`). The first pass was a cold read; the second very likely came from the page cache.
+  - A 29× speed-up from 2× workers is implausible, so the cold-read reading is the likely one. It is still a HYPOTHESIS.
+  - Cold rate ≈ 27–28 img/s; warm rate ≥ 685 img/s.
+  - If the cold rate holds, the first pass over the 100k TinyImageNet train images takes about 1 h per new session (100,000 / 28 ≈ 3,570 s). That is arithmetic, not a measurement.
