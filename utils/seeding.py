@@ -42,8 +42,15 @@ def seed_everything(seed: int) -> None:
 def set_eval_determinism(tf32: bool) -> dict:
     """Configure cuDNN / TF32 flags for evaluation and return the applied state.
 
-    - cudnn.deterministic = True, cudnn.benchmark = False (DeiT-S has one Conv2d,
-      the patch embedding, so cuDNN algorithm choice does matter).
+    - cudnn.deterministic = False, cudnn.benchmark = False (the PyTorch defaults,
+      which the July phase scripts also ran with). DeiT-S has one Conv2d, the
+      patch embedding. On a T4 (torch 2.11 / cu130) deterministic=True selects a
+      backward-to-input algorithm that is ~500x slower at batch 24 and 32 only
+      (RESULTS_LOG R-004: 16.5 vs ~8000 img/s), making every attack step ~10x
+      slower; decided 2026-11-13 to use deterministic=False. benchmark stays
+      False: with it on, a repeated bs32 gradient was not bit-identical (R-004 C),
+      whereas deterministic=False / benchmark=False gave bit-identical repeats in
+      one process. Cross-session repeatability is checked by repro_check.
     - TF32 is set EXPLICITLY for both cuBLAS matmuls and cuDNN convolutions, so
       the run log records exactly what was used instead of relying on PyTorch's
       version-dependent defaults.
@@ -63,7 +70,7 @@ def set_eval_determinism(tf32: bool) -> dict:
     """
     import torch
 
-    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.deterministic = False  # R-004; see docstring
     torch.backends.cudnn.benchmark = False
     torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
     torch.backends.cudnn.allow_tf32 = bool(tf32)

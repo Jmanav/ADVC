@@ -3,9 +3,11 @@
 # 1,000 stratified val images (5/class, seed 0), clean / FGSM / PGD-20, fp32 / int8 / int4, compared
 # with the July rows of results/tiny-imagenet/phase1_results.csv by a two-proportion 95 % check.
 # Resumable: finished (precision, attack) results for the same subset are reused unless --force.
-# Estimated runtime: ~60-70 min on a T4. Extrapolated from the W1 smoke (fp32 PGD-20 on 32 images took
-# 39.6 s, i.e. ~17 image-passes/s): 1,000 x ~22 passes per precision x 3 precisions. The earlier
-# "8-12 min" figure used the §5.0 planning rate and was ~6x too low. Re-derive from calibrate_tiny.
+# Estimated runtime: ~8-10 min on a T4 (estimate). With cudnn.deterministic=False (R-004) fwd+bwd runs at
+# ~132 (fp32) and ~218 (int4) passes/s at bs32; int8 at bs32 with deterministic=False is NOT yet measured
+# (bs16: 140.8, R-003). 1,000 images x ~22 passes = 22,000 passes per precision -> ~2.8 + ~2.6 + ~1.7 min GPU,
+# plus model loads and a cold first read of 1,000 val images (~37 s at the R-004 cold rate of ~27 img/s).
+# The earlier ~60-70 min figure came from the deterministic=True slowdown (R-003/R-004).
 name: repro_check_tiny
 type: repro_check
 dataset: tiny-imagenet

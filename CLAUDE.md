@@ -125,6 +125,12 @@ tiny-imagenet dirs at `/kaggle/working/tiny_if/...`. Never symlink the read-only
   200-row checkpoints are padded on load (`pad_int8_state_dict`). Paper: one
   sentence in the methods ("the INT8 classifier is padded to a multiple of 16
   output rows for the cuBLASLt kernel; this does not change its outputs").
+- **cuDNN determinism OFF (decided 2026-11-13).** `utils/seeding.py:set_eval_determinism`
+  sets `cudnn.deterministic=False, benchmark=False` (PyTorch defaults; the July scripts
+  used the same). With deterministic=True the T4 picks a patch-embedding Conv2d
+  backward that is ~500x slower at batch 24/32 only, making attacks ~10x slower
+  (RESULTS_LOG R-004). deterministic=False/benchmark=False gave bit-identical repeated
+  bs32 gradients in one process; benchmark=True did not, so keep it False.
 - **INT4 full-model pickles need `torch.load(..., weights_only=False)`** —
   torch ≥2.6 defaults to `weights_only=True` and cannot unpickle nn.Modules.
 - **Tensor cache** (`utils/tensor_cache.py`, `scripts/build_tensor_cache.py`).
